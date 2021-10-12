@@ -1,0 +1,14 @@
+[Unit]
+Description=Set the keyboard layout for PocketCHIP
+DefaultDependencies=no
+Before=local-fs-pre.target
+Wants=local-fs-pre.target
+ConditionPathExists=/bin/setupcon
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/loadkeys /usr/local/share/keymaps/pocketchip.kmap
+RemainAfterExit=yes
+
+[Install]
+WantedBy=sysinit.target

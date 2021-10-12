@@ -1,0 +1,39 @@
+#######################################################################
+# PocketChip keymap
+# totor59
+#
+# To make it permanent place the following in /etc/rc.local
+# /usr/bin/loadkeys path/to/pocketchip.kmap
+#
+#######################################################################
+
+keymaps 0-2,4-5,8,12
+keycode 100  = AltGr
+altgr keycode  2 = F1
+altgr keycode  3 = F2
+altgr keycode  4 = F3
+altgr keycode  5 = F4
+altgr keycode  6 = F5
+altgr keycode  7 = F6
+altgr keycode  8 = F7
+altgr keycode  9 = F8
+altgr keycode 10 = F9
+altgr keycode 11 = F10
+altgr keycode 74 = F11
+shift keycode 74 = underscore
+altgr keycode 13 = F12
+altgr keycode 21 = braceleft
+altgr keycode 22 = braceright
+altgr keycode 23 = bracketleft
+altgr keycode 24 = bracketright
+altgr keycode 25 = bar
+altgr keycode 35 = less
+altgr keycode 36 = greater
+altgr keycode 37 = apostrophe
+altgr keycode 38 = quotedbl
+altgr keycode 48 = grave
+altgr keycode 49 = asciitilde
+altgr keycode 50 = colon
+altgr keycode 52 = semicolon
+shift keycode 52 = comma
+altgr keycode 53 = backslash

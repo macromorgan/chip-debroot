@@ -1,0 +1,73 @@
+From 6982e1b2bab1abbf9482dd0528eeae229392fd28 Mon Sep 17 00:00:00 2001
+From: Chris Morgan <macromorgan@hotmail.com>
+Date: Thu, 30 Sep 2021 11:15:54 -0500
+Subject: [PATCH] mtd: rawnand: hynix: Add support for H27UCG8T2ETR-BC MLC NAND
+
+Add support for the H27UCG8T2ETR-BC MLC NAND. The NAND is used widely
+in the NTC CHIP, is an MLC type NAND, and is 8GB in size. Neither
+JEDEC nor ONFI detection identifies it correctly, so the ID is added
+to the nand_ids.c file. Additionally, per the datasheet this NAND
+appears to use the same paired pages scheme as the Toshiba
+TC58TEG5DCLTA00 (dist3), so add support for that to enable use in
+SLC emulation mode.
+
+Tested on a NTC CHIP the device is able to write to a ubifs formatted
+partition, and then have U-Boot (with proposed patches) boot from a
+kernel located on that ubifs formatted partition.
+
+Signed-off-by: Chris Morgan <macromorgan@hotmail.com>
+---
+ drivers/mtd/nand/raw/nand_hynix.c | 14 ++++++++++++++
+ drivers/mtd/nand/raw/nand_ids.c   |  4 ++++
+ 2 files changed, 18 insertions(+)
+
+diff --git a/drivers/mtd/nand/raw/nand_hynix.c b/drivers/mtd/nand/raw/nand_hynix.c
+index a9f50c9af109..0d4d4bbfdece 100644
+--- a/drivers/mtd/nand/raw/nand_hynix.c
++++ b/drivers/mtd/nand/raw/nand_hynix.c
+@@ -686,6 +686,16 @@ h27ucg8t2atrbc_choose_interface_config(struct nand_chip *chip,
+ 	return nand_choose_best_sdr_timings(chip, iface, NULL);
+ }
+ 
++static int h27ucg8t2etrbc_init(struct nand_chip *chip)
++{
++	struct mtd_info *mtd = nand_to_mtd(chip);
++
++	chip->options |= NAND_NEED_SCRAMBLING;
++	mtd_set_pairing_scheme(mtd, &dist3_pairing_scheme);
++
++	return 0;
++}
++
+ static int hynix_nand_init(struct nand_chip *chip)
+ {
+ 	struct hynix_nand *hynix;
+@@ -707,6 +717,10 @@ static int hynix_nand_init(struct nand_chip *chip)
+ 		chip->ops.choose_interface_config =
+ 			h27ucg8t2atrbc_choose_interface_config;
+ 
++	if (!strncmp("H27UCG8T2ETR-BC", chip->parameters.model,
++		     sizeof("H27UCG8T2ETR-BC") - 1))
++		h27ucg8t2etrbc_init(chip);
++
+ 	ret = hynix_nand_rr_init(chip);
+ 	if (ret)
+ 		hynix_nand_cleanup(chip);
+diff --git a/drivers/mtd/nand/raw/nand_ids.c b/drivers/mtd/nand/raw/nand_ids.c
+index b9945791a9d7..6e41902be35f 100644
+--- a/drivers/mtd/nand/raw/nand_ids.c
++++ b/drivers/mtd/nand/raw/nand_ids.c
+@@ -51,6 +51,10 @@ struct nand_flash_dev nand_flash_ids[] = {
+ 		{ .id = {0xad, 0xde, 0x94, 0xda, 0x74, 0xc4} },
+ 		  SZ_8K, SZ_8K, SZ_2M, NAND_NEED_SCRAMBLING, 6, 640,
+ 		  NAND_ECC_INFO(40, SZ_1K) },
++	{"H27UCG8T2ETR-BC 64G 3.3V 8-bit",
++		{ .id = {0xad, 0xde, 0x14, 0xa7, 0x42, 0x4a} },
++		  SZ_16K, SZ_8K, SZ_4M, NAND_NEED_SCRAMBLING, 6, 1664,
++		  NAND_ECC_INFO(40, SZ_1K) },
+ 	{"TH58NVG2S3HBAI4 4G 3.3V 8-bit",
+ 		{ .id = {0x98, 0xdc, 0x91, 0x15, 0x76} },
+ 		  SZ_2K, SZ_512, SZ_128K, 0, 5, 128, NAND_ECC_INFO(8, SZ_512) },
+-- 
+2.30.2
+

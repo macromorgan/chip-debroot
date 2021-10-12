@@ -1,0 +1,16 @@
+#service code lovingly borrowed from djdiskmachine, thank you.
+[Unit]
+Description=NAND health watchdog service
+ConditionFileIsExecutable=/usr/sbin/ubihealthd
+After=systemd-journald.socket
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/ubihealthd -d /dev/ubi0 -f /var/cache/ubihealthd.v1.stats
+PIDFile=/run/ubihealthd.pid
+StandardOutput=journal
+Restart=on-failure
+Nice=19
+
+[Install]
+WantedBy=multi-user.target
