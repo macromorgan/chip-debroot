@@ -19,4 +19,25 @@ many of the included files placed in the correct location), then I create a
 bootable ubifs image by doing the following:
 
 sudo mkfs.ubifs -q -r /path/to/debroot -m 16384 -e 2064384 -c 2048 -o nand.ubi
+
 ubinize -o root.ubi -m 16384 -p 2097152 ubi.cfg
+
+To build the kernel, I do the following:
+
+Follow the steps from the page detailed here first to install prerequisites.
+https://wiki.debian.org/HowToCrossBuildAnOfficialDebianKernelPackage
+This includes installing the packages for crossbuild-essential-armhf.
+I use apt-get source linux, but you are welcome to use the instructions in
+the link above to get the kernel source. Once you download the necessary source,
+apply the patch from this git to the kernel (go into the kernel source directory
+and type "git apply path/to/patch" to apply the patch).
+
+The setup I use for compiling the Debian kernel is ARCH=armhf, FEATURESET=none,
+FLAVOUR=armmp. Note that following that guide after you do the step
+fakeroot make -f debian/rules.gen setup_${ARCH}_${FEATURESET}_${FLAVOUR}
+but before you do the step of
+fakeroot make -f debian/rules.gen binary-arch_${ARCH}_${FEATURESET}_${FLAVOUR}
+I do
+make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- -C debian/build/build_armhf_none_armmp menuconfig
+and then add the necessary config options mentioned previously. When complete
+you should have an installable set of debian files for your kernel.
