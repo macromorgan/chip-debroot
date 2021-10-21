@@ -1,0 +1,58 @@
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "nextthing,chip", "allwinner,sun5i-r8", "allwinner,sun5i-a13";
+
+	fragment@0{
+		target = <&i2c1>;
+
+		__overlay__ {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "okay";
+
+			hdmi-bridge@76 {
+				#address-cells = <1>;
+				#size-cells = <0>;
+				compatible = "chrontel,ch7033";
+				reg = <0x76>;
+
+				port@0 {
+					reg = <0>;
+					#address-cells = <1>;
+					#size-cells = <0>;
+
+					hdmi_input: endpoint@0 {
+						reg = <0>;
+						remote-endpoint = <&tcon0_out_hdmi>;
+					};
+				};
+			};
+		};
+	};
+
+	fragment@1{
+		target = <&tcon0>;
+
+		__overlay__ {
+			pinctrl-names = "default";
+			pinctrl-0 = <&lcd_rgb565_pins>;
+		};
+	};
+
+	fragment@2{
+		target = <&tcon0_out>;
+
+		__overlay__ {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			tcon0_out_hdmi: endpoint@0 {
+				reg = <0>;
+				remote-endpoint = <&hdmi_input>;
+				allwinner,tcon-channel = <0>;
+			};
+		};
+	};
+};
