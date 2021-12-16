@@ -1,0 +1,38 @@
+gpio clear PB4
+setenv extension_overlay_addr ${fdtoverlay_addr_r}
+setenv extension_overlay_cmd 'ubifsload ${fdtoverlay_addr_r} /boot/overlays/${extension_overlay_name}'
+setenv extension_apply_cmd 'fdt addr ${fdt_addr_r}; fdt resize; extension apply all'
+if test -z "${device}"; then setenv device "${devtype}"; fi
+if test -z "${partition}${distro_bootpart}"; then setenv partition "${devnum}:${bootpart}"; fi
+if test -z "${partition}"; then setenv partition "${devnum}:${distro_bootpart}"; fi
+if test -n "${console}"; then
+  setenv bootargs "${bootargs} console=${console}"
+fi
+setenv bootargs @@LINUX_KERNEL_CMDLINE_DEFAULTS@@ ${bootargs} @@LINUX_KERNEL_CMDLINE@@
+@@UBOOT_ENV_EXTRA@@
+if test -z "${image_locations}"; then
+   setenv image_locations ${prefix}
+fi
+if test -z "${image_locations}"; then
+   setenv image_locations /boot/ /
+fi
+if test -z "${fk_kvers}"; then
+   setenv fk_kvers '@@KERNEL_VERSION@@'
+fi
+if test -n "${fdtfile}"; then
+   setenv fdtpath dtbs/${fk_kvers}/${fdtfile}
+else
+   setenv fdtpath dtb-${fk_kvers}
+fi
+for pathprefix in ${image_locations}
+do
+  load ${device} ${partition} ${fdt_addr_r} ${pathprefix}${fdtpath}; run extension_apply_cmd
+  if test -e ${device} ${partition} ${pathprefix}vmlinuz-${fk_kvers}
+  then
+    load ${device} ${partition} ${kernel_addr_r} ${pathprefix}vmlinuz-${fk_kvers} \
+    && load ${device} ${partition} ${ramdisk_addr_r} ${pathprefix}initrd.img-${fk_kvers} \
+    && echo "Booting Debian ${fk_kvers} from ${device} ${partition}..." \
+    && gpio set PB4 \
+    && bootz ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}
+  fi
+done

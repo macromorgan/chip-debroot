@@ -8,5 +8,7 @@
 
 Machine: NextThing C.H.I.P.
 Kernel-Flavors: armmp
+Boot-Script-Path: /boot/boot.scr
 DTB-Id: sun5i-r8-chip.dtb
 Required-Packages: u-boot-tools
+U-Boot-Script-Name: bootscr.chip
