@@ -1,0 +1,1479 @@
+From 0b1b1070d9c844215eef0bc5bdf644fb8e99e040 Mon Sep 17 00:00:00 2001
+From: Chris Morgan <macromorgan@hotmail.com>
+Date: Thu, 16 Dec 2021 12:50:38 -0600
+Subject: [PATCH] sunxi: Add support for slc emulation on mlc NAND
+
+This patch series adds support for slc emulation on MLC NAND, and
+enables support for the NAND controller in the devicetree.
+
+Signed-off-By: Chris Morgan <macromorgan@hotmail.com>
+---
+ arch/arm/dts/sun5i-r8-chip.dts   |  16 +
+ cmd/mtdparts.c                   |  20 ++
+ drivers/mtd/mtdcore.c            | 564 ++++++++++++++++++++++++-------
+ drivers/mtd/mtdcore.h            |   1 -
+ drivers/mtd/mtdpart.c            |   7 +
+ drivers/mtd/nand/raw/nand_base.c |  67 ++++
+ include/configs/sunxi-common.h   |   2 +
+ include/linux/mtd/mtd.h          | 190 ++++++++++-
+ include/linux/mtd/partitions.h   |  24 +-
+ include/mtd/mtd-abi.h            |   1 +
+ 10 files changed, 767 insertions(+), 125 deletions(-)
+
+diff --git a/arch/arm/dts/sun5i-r8-chip.dts b/arch/arm/dts/sun5i-r8-chip.dts
+index 879a4b0f3b..80dc037986 100644
+--- a/arch/arm/dts/sun5i-r8-chip.dts
++++ b/arch/arm/dts/sun5i-r8-chip.dts
+@@ -175,6 +175,22 @@
+ 	status = "okay";
+ };
+ 
++&nfc {
++	pinctrl-names = "default";
++	pinctrl-0 = <&nand_pins_a &nand_cs0_pins_a &nand_rb0_pins_a>;
++	status = "okay";
++
++	nand@0 {
++		#address-cells = <2>;
++		#size-cells = <2>;
++		reg = <0>;
++		allwinner,rb = <0>;
++		nand-ecc-mode = "hw";
++		nand-ecc-maximize;
++		nand-on-flash-bbt;
++	};
++};
++
+ &ohci0 {
+ 	status = "okay";
+ };
+diff --git a/cmd/mtdparts.c b/cmd/mtdparts.c
+index 3048700778..5c1ad09bf5 100644
+--- a/cmd/mtdparts.c
++++ b/cmd/mtdparts.c
+@@ -110,6 +110,10 @@ DECLARE_GLOBAL_DATA_PTR;
+  * field for read-only partitions */
+ #define MTD_WRITEABLE_CMD		1
+ 
++/* this flag needs to be set in part_info struct mask_flags
++ * field for slc-emulation partitions */
++#define MTD_SLC_ON_MLC_EMULATION_CMD	1
++
+ /* default values for mtdids and mtdparts variables */
+ #if !defined(MTDIDS_DEFAULT)
+ #ifdef CONFIG_MTDIDS_DEFAULT
+@@ -662,6 +666,11 @@ static int part_parse(const char *const partdef, const char **ret, struct part_i
+ 		p += 2;
+ 	}
+ 
++        if (strncmp(p, "slc", 3) == 0) {
++                mask_flags |= MTD_SLC_ON_MLC_EMULATION_CMD;
++                p += 3;
++        }
++
+ 	/* check for next partition definition */
+ 	if (*p == ',') {
+ 		if (size == SIZE_REMAINING) {
+@@ -1171,6 +1180,17 @@ static int generate_mtdparts(char *buf, u32 buflen)
+ 				maxlen -= 2;
+ 			}
+ 
++                        /* slc mask flag */
++                        if (part->mask_flags && MTD_SLC_ON_MLC_EMULATION_CMD) {
++                                len = 3;
++                                if (len > maxlen)
++                                        goto cleanup;
++                                *(p++) = 's';
++                                *(p++) = 'l';
++				*(p++) = 'c';
++                                maxlen -= 3;
++                        }
++
+ 			/* print ',' separator if there are other partitions
+ 			 * following */
+ 			if (dev->num_parts > part_cnt) {
+diff --git a/drivers/mtd/mtdcore.c b/drivers/mtd/mtdcore.c
+index 582129d0df..efb749cdf2 100644
+--- a/drivers/mtd/mtdcore.c
++++ b/drivers/mtd/mtdcore.c
+@@ -397,6 +397,114 @@ static struct device_type mtd_devtype = {
+ };
+ #endif
+ 
++/**
++ * mtd_wunit_to_pairing_info - get pairing information of a wunit
++ * @mtd: pointer to new MTD device info structure
++ * @wunit: write unit we are interested in
++ * @info: returned pairing information
++ *
++ * Retrieve pairing information associated to the wunit.
++ * This is mainly useful when dealing with MLC/TLC NANDs where pages can be
++ * paired together, and where programming a page may influence the page it is
++ * paired with.
++ * The notion of page is replaced by the term wunit (write-unit) to stay
++ * consistent with the ->writesize field.
++ *
++ * The @wunit argument can be extracted from an absolute offset using
++ * mtd_offset_to_wunit(). @info is filled with the pairing information attached
++ * to @wunit.
++ *
++ * From the pairing info the MTD user can find all the wunits paired with
++ * @wunit using the following loop:
++ *
++ * for (i = 0; i < mtd_pairing_groups(mtd); i++) {
++ *	info.pair = i;
++ *	mtd_pairing_info_to_wunit(mtd, &info);
++ *	...
++ * }
++ */
++int mtd_wunit_to_pairing_info(struct mtd_info *mtd, int wunit,
++			      struct mtd_pairing_info *info)
++{
++	struct mtd_info *master = mtd_get_master(mtd);
++	int npairs = mtd_wunit_per_eb(master) / mtd_pairing_groups(master);
++
++	if (wunit < 0 || wunit >= npairs)
++		return -EINVAL;
++
++	if (master->pairing && master->pairing->get_info)
++		return master->pairing->get_info(master, wunit, info);
++
++	info->group = 0;
++	info->pair = wunit;
++
++	return 0;
++}
++EXPORT_SYMBOL_GPL(mtd_wunit_to_pairing_info);
++
++/**
++ * mtd_pairing_info_to_wunit - get wunit from pairing information
++ * @mtd: pointer to new MTD device info structure
++ * @info: pairing information struct
++ *
++ * Returns a positive number representing the wunit associated to the info
++ * struct, or a negative error code.
++ *
++ * This is the reverse of mtd_wunit_to_pairing_info(), and can help one to
++ * iterate over all wunits of a given pair (see mtd_wunit_to_pairing_info()
++ * doc).
++ *
++ * It can also be used to only program the first page of each pair (i.e.
++ * page attached to group 0), which allows one to use an MLC NAND in
++ * software-emulated SLC mode:
++ *
++ * info.group = 0;
++ * npairs = mtd_wunit_per_eb(mtd) / mtd_pairing_groups(mtd);
++ * for (info.pair = 0; info.pair < npairs; info.pair++) {
++ *	wunit = mtd_pairing_info_to_wunit(mtd, &info);
++ *	mtd_write(mtd, mtd_wunit_to_offset(mtd, blkoffs, wunit),
++ *		  mtd->writesize, &retlen, buf + (i * mtd->writesize));
++ * }
++ */
++int mtd_pairing_info_to_wunit(struct mtd_info *mtd,
++			      const struct mtd_pairing_info *info)
++{
++	struct mtd_info *master = mtd_get_master(mtd);
++	int ngroups = mtd_pairing_groups(master);
++	int npairs = mtd_wunit_per_eb(master) / ngroups;
++
++	if (!info || info->pair < 0 || info->pair >= npairs ||
++	    info->group < 0 || info->group >= ngroups)
++		return -EINVAL;
++
++	if (master->pairing && master->pairing->get_wunit)
++		return mtd->pairing->get_wunit(master, info);
++
++	return info->pair;
++}
++EXPORT_SYMBOL_GPL(mtd_pairing_info_to_wunit);
++
++/**
++ * mtd_pairing_groups - get the number of pairing groups
++ * @mtd: pointer to new MTD device info structure
++ *
++ * Returns the number of pairing groups.
++ *
++ * This number is usually equal to the number of bits exposed by a single
++ * cell, and can be used in conjunction with mtd_pairing_info_to_wunit()
++ * to iterate over all pages of a given pair.
++ */
++int mtd_pairing_groups(struct mtd_info *mtd)
++{
++	struct mtd_info *master = mtd_get_master(mtd);
++
++	if (!master->pairing || !master->pairing->ngroups)
++		return 1;
++
++	return master->pairing->ngroups;
++}
++EXPORT_SYMBOL_GPL(mtd_pairing_groups);
++
+ /**
+  *	add_mtd_device - register an MTD device
+  *	@mtd: pointer to new MTD device info structure
+@@ -412,6 +520,7 @@ int add_mtd_device(struct mtd_info *mtd)
+ #ifndef __UBOOT__
+ 	struct mtd_notifier *not;
+ #endif
++	struct mtd_info *master = mtd_get_master(mtd);
+ 	int i, error;
+ 
+ #ifndef __UBOOT__
+@@ -431,6 +540,20 @@ int add_mtd_device(struct mtd_info *mtd)
+ #endif
+ 
+ 	BUG_ON(mtd->writesize == 0);
++
++	/*
++	 * MTD_SLC_ON_MLC_EMULATION can only be set on partitions, when the
++	 * master is an MLC NAND and has a proper pairing scheme defined.
++	 * We also reject masters that implement ->_writev() for now, because
++	 * NAND controller drivers don't implement this hook, and adding the
++	 * SLC -> MLC address/length conversion to this path is useless if we
++	 * don't have a user.
++	 */
++	if (mtd->flags & MTD_SLC_ON_MLC_EMULATION &&
++	    (!mtd_is_partition(mtd) || master->type != MTD_MLCNANDFLASH ||
++	     !master->pairing))
++		return -EINVAL;
++
+ 	mutex_lock(&mtd_table_mutex);
+ 
+ 	i = idr_alloc(&mtd_idr, mtd, 0, 0, GFP_KERNEL);
+@@ -446,6 +569,14 @@ int add_mtd_device(struct mtd_info *mtd)
+ 	if (mtd->bitflip_threshold == 0)
+ 		mtd->bitflip_threshold = mtd->ecc_strength;
+ 
++	if (mtd->flags & MTD_SLC_ON_MLC_EMULATION) {
++		int ngroups = mtd_pairing_groups(master);
++
++		mtd->erasesize /= ngroups;
++		mtd->size = (u64)mtd_div_by_eb(mtd->size, master) *
++			    mtd->erasesize;
++	}
++
+ 	if (is_power_of_2(mtd->erasesize))
+ 		mtd->erasesize_shift = ffs(mtd->erasesize) - 1;
+ 	else
+@@ -750,20 +881,28 @@ EXPORT_SYMBOL_GPL(get_mtd_device);
+ 
+ int __get_mtd_device(struct mtd_info *mtd)
+ {
++	struct mtd_info *master = mtd_get_master(mtd);
+ 	int err;
+ 
+-	if (!try_module_get(mtd->owner))
++	if (!try_module_get(master->owner))
+ 		return -ENODEV;
+ 
+-	if (mtd->_get_device) {
+-		err = mtd->_get_device(mtd);
++	if (master->_get_device) {
++		err = master->_get_device(mtd);
+ 
+ 		if (err) {
+-			module_put(mtd->owner);
++			module_put(master->owner);
+ 			return err;
+ 		}
+ 	}
+-	mtd->usecount++;
++
++	master->usecount++;
++
++	while (mtd->parent) {
++		mtd->usecount++;
++		mtd = mtd->parent;
++	}
++
+ 	return 0;
+ }
+ EXPORT_SYMBOL_GPL(__get_mtd_device);
+@@ -896,13 +1035,20 @@ EXPORT_SYMBOL_GPL(put_mtd_device);
+ 
+ void __put_mtd_device(struct mtd_info *mtd)
+ {
+-	--mtd->usecount;
+-	BUG_ON(mtd->usecount < 0);
++	struct mtd_info *master = mtd_get_master(mtd);
++
++	while (mtd->parent) {
++		--mtd->usecount;
++		BUG_ON(mtd->usecount < 0);
++		mtd = mtd->parent;
++	}
++
++	master->usecount--;
+ 
+-	if (mtd->_put_device)
+-		mtd->_put_device(mtd);
++	if (master->_put_device)
++		master->_put_device(master);
+ 
+-	module_put(mtd->owner);
++	module_put(master->owner);
+ }
+ EXPORT_SYMBOL_GPL(__put_mtd_device);
+ 
+@@ -915,17 +1061,47 @@ EXPORT_SYMBOL_GPL(__put_mtd_device);
+  */
+ int mtd_erase(struct mtd_info *mtd, struct erase_info *instr)
+ {
++	struct mtd_info *master = mtd_get_master(mtd);
++	u64 mst_ofs = mtd_get_master_ofs(mtd, 0);
++	struct erase_info adjinstr;
++	int ret;
++
++	instr->fail_addr = MTD_FAIL_ADDR_UNKNOWN;
++	adjinstr = *instr;
++
++	if (!mtd->erasesize || !master->_erase)
++		return -ENOTSUPP;
++
+ 	if (instr->addr > mtd->size || instr->len > mtd->size - instr->addr)
+ 		return -EINVAL;
+ 	if (!(mtd->flags & MTD_WRITEABLE))
+ 		return -EROFS;
+-	instr->fail_addr = MTD_FAIL_ADDR_UNKNOWN;
+-	if (!instr->len) {
+-		instr->state = MTD_ERASE_DONE;
+-		mtd_erase_callback(instr);
++
++	if (!instr->len)
+ 		return 0;
++
++	if (mtd->flags & MTD_SLC_ON_MLC_EMULATION) {
++		adjinstr.addr = (loff_t)mtd_div_by_eb(instr->addr, mtd) *
++				master->erasesize;
++		adjinstr.len = ((u64)mtd_div_by_eb(instr->addr + instr->len, mtd) *
++				master->erasesize) -
++			       adjinstr.addr;
+ 	}
+-	return mtd->_erase(mtd, instr);
++
++	adjinstr.addr += mst_ofs;
++
++	ret = master->_erase(master, &adjinstr);
++
++	if (adjinstr.fail_addr != MTD_FAIL_ADDR_UNKNOWN) {
++		instr->fail_addr = adjinstr.fail_addr - mst_ofs;
++		if (mtd->flags & MTD_SLC_ON_MLC_EMULATION) {
++			instr->fail_addr = mtd_div_by_eb(instr->fail_addr,
++							 master);
++			instr->fail_addr *= mtd->erasesize;
++		}
++	}
++
++	return ret;
+ }
+ EXPORT_SYMBOL_GPL(mtd_erase);
+ 
+@@ -936,30 +1112,36 @@ EXPORT_SYMBOL_GPL(mtd_erase);
+ int mtd_point(struct mtd_info *mtd, loff_t from, size_t len, size_t *retlen,
+ 	      void **virt, resource_size_t *phys)
+ {
++	struct mtd_info *master = mtd_get_master(mtd);
++
+ 	*retlen = 0;
+ 	*virt = NULL;
+ 	if (phys)
+ 		*phys = 0;
+-	if (!mtd->_point)
++	if (!master->_point)
+ 		return -EOPNOTSUPP;
+ 	if (from < 0 || from > mtd->size || len > mtd->size - from)
+ 		return -EINVAL;
+ 	if (!len)
+ 		return 0;
+-	return mtd->_point(mtd, from, len, retlen, virt, phys);
++
++	from = mtd_get_master_ofs(mtd, from);
++	return master->_point(master, from, len, retlen, virt, phys);
+ }
+ EXPORT_SYMBOL_GPL(mtd_point);
+ 
+ /* We probably shouldn't allow XIP if the unpoint isn't a NULL */
+ int mtd_unpoint(struct mtd_info *mtd, loff_t from, size_t len)
+ {
+-	if (!mtd->_point)
++	struct mtd_info *master = mtd_get_master(mtd);
++
++	if (!master->_point)
+ 		return -EOPNOTSUPP;
+ 	if (from < 0 || from > mtd->size || len > mtd->size - from)
+ 		return -EINVAL;
+ 	if (!len)
+ 		return 0;
+-	return mtd->_unpoint(mtd, from, len);
++	return master->_unpoint(master, mtd_get_master_ofs(mtd, from), len);
+ }
+ EXPORT_SYMBOL_GPL(mtd_unpoint);
+ #endif
+@@ -980,68 +1162,54 @@ unsigned long mtd_get_unmapped_area(struct mtd_info *mtd, unsigned long len,
+ }
+ EXPORT_SYMBOL_GPL(mtd_get_unmapped_area);
+ 
++static void mtd_update_ecc_stats(struct mtd_info *mtd, struct mtd_info *master,
++				 const struct mtd_ecc_stats *old_stats)
++{
++	struct mtd_ecc_stats diff;
++
++	if (master == mtd)
++		return;
++
++	diff = master->ecc_stats;
++	diff.failed -= old_stats->failed;
++	diff.corrected -= old_stats->corrected;
++
++	while (mtd->parent) {
++		mtd->ecc_stats.failed += diff.failed;
++		mtd->ecc_stats.corrected += diff.corrected;
++		mtd = mtd->parent;
++	}
++}
++
+ int mtd_read(struct mtd_info *mtd, loff_t from, size_t len, size_t *retlen,
+ 	     u_char *buf)
+ {
+-	int ret_code;
+-	*retlen = 0;
+-	if (from < 0 || from > mtd->size || len > mtd->size - from)
+-		return -EINVAL;
+-	if (!len)
+-		return 0;
++	struct mtd_oob_ops ops = {
++		.len = len,
++		.datbuf = buf,
++	};
++	int ret;
+ 
+-	/*
+-	 * In the absence of an error, drivers return a non-negative integer
+-	 * representing the maximum number of bitflips that were corrected on
+-	 * any one ecc region (if applicable; zero otherwise).
+-	 */
+-	if (mtd->_read) {
+-		ret_code = mtd->_read(mtd, from, len, retlen, buf);
+-	} else if (mtd->_read_oob) {
+-		struct mtd_oob_ops ops = {
+-			.len = len,
+-			.datbuf = buf,
+-		};
+-
+-		ret_code = mtd->_read_oob(mtd, from, &ops);
+-		*retlen = ops.retlen;
+-	} else {
+-		return -ENOTSUPP;
+-	}
++	ret = mtd_read_oob(mtd, from, &ops);
++	*retlen = ops.retlen;
+ 
+-	if (unlikely(ret_code < 0))
+-		return ret_code;
+-	if (mtd->ecc_strength == 0)
+-		return 0;	/* device lacks ecc */
+-	return ret_code >= mtd->bitflip_threshold ? -EUCLEAN : 0;
++	return ret;
+ }
+ EXPORT_SYMBOL_GPL(mtd_read);
+ 
+ int mtd_write(struct mtd_info *mtd, loff_t to, size_t len, size_t *retlen,
+ 	      const u_char *buf)
+ {
+-	*retlen = 0;
+-	if (to < 0 || to > mtd->size || len > mtd->size - to)
+-		return -EINVAL;
+-	if ((!mtd->_write && !mtd->_write_oob) ||
+-	    !(mtd->flags & MTD_WRITEABLE))
+-		return -EROFS;
+-	if (!len)
+-		return 0;
+-
+-	if (!mtd->_write) {
+-		struct mtd_oob_ops ops = {
+-			.len = len,
+-			.datbuf = (u8 *)buf,
+-		};
+-		int ret;
++	struct mtd_oob_ops ops = {
++		.len = len,
++		.datbuf = (u8 *)buf,
++	};
++	int ret;
+ 
+-		ret = mtd->_write_oob(mtd, to, &ops);
+-		*retlen = ops.retlen;
+-		return ret;
+-	}
++	ret = mtd_write_oob(mtd, to, &ops);
++	*retlen = ops.retlen;
+ 
+-	return mtd->_write(mtd, to, len, retlen, buf);
++	return ret;
+ }
+ EXPORT_SYMBOL_GPL(mtd_write);
+ 
+@@ -1055,8 +1223,10 @@ EXPORT_SYMBOL_GPL(mtd_write);
+ int mtd_panic_write(struct mtd_info *mtd, loff_t to, size_t len, size_t *retlen,
+ 		    const u_char *buf)
+ {
++	struct mtd_info *master = mtd_get_master(mtd);
++
+ 	*retlen = 0;
+-	if (!mtd->_panic_write)
++	if (!master->_panic_write)
+ 		return -EOPNOTSUPP;
+ 	if (to < 0 || to > mtd->size || len > mtd->size - to)
+ 		return -EINVAL;
+@@ -1064,7 +1234,8 @@ int mtd_panic_write(struct mtd_info *mtd, loff_t to, size_t len, size_t *retlen,
+ 		return -EROFS;
+ 	if (!len)
+ 		return 0;
+-	return mtd->_panic_write(mtd, to, len, retlen, buf);
++	return master->_panic_write(master, mtd_get_master_ofs(mtd, to), len,
++				    retlen, buf);
+ }
+ EXPORT_SYMBOL_GPL(mtd_panic_write);
+ 
+@@ -1101,9 +1272,107 @@ static int mtd_check_oob_ops(struct mtd_info *mtd, loff_t offs,
+ 	return 0;
+ }
+ 
++static int mtd_read_oob_std(struct mtd_info *mtd, loff_t from,
++			    struct mtd_oob_ops *ops)
++{
++	struct mtd_info *master = mtd_get_master(mtd);
++	int ret;
++
++	from = mtd_get_master_ofs(mtd, from);
++	if (master->_read_oob)
++		ret = master->_read_oob(master, from, ops);
++	else
++		ret = master->_read(master, from, ops->len, &ops->retlen,
++				 ops->datbuf);
++
++	return ret;
++}
++
++static int mtd_write_oob_std(struct mtd_info *mtd, loff_t to,
++			     struct mtd_oob_ops *ops)
++{
++	struct mtd_info *master = mtd_get_master(mtd);
++	int ret;
++
++	to = mtd_get_master_ofs(mtd, to);
++	if (master->_write_oob)
++		ret = master->_write_oob(master, to, ops);
++	else
++		ret = master->_write(master, to, ops->len, &ops->retlen,
++				  ops->datbuf);
++
++	return ret;
++}
++
++static int mtd_io_emulated_slc(struct mtd_info *mtd, loff_t start, bool read,
++			       struct mtd_oob_ops *ops)
++{
++	struct mtd_info *master = mtd_get_master(mtd);
++	int ngroups = mtd_pairing_groups(master);
++	int npairs = mtd_wunit_per_eb(master) / ngroups;
++	struct mtd_oob_ops adjops = *ops;
++	unsigned int wunit, oobavail;
++	struct mtd_pairing_info info;
++	int max_bitflips = 0;
++	u32 ebofs, pageofs;
++	loff_t base, pos;
++
++	ebofs = mtd_mod_by_eb(start, mtd);
++	base = (loff_t)mtd_div_by_eb(start, mtd) * master->erasesize;
++	info.group = 0;
++	info.pair = mtd_div_by_ws(ebofs, mtd);
++	pageofs = mtd_mod_by_ws(ebofs, mtd);
++	oobavail = mtd_oobavail(mtd, ops);
++
++	while (ops->retlen < ops->len || ops->oobretlen < ops->ooblen) {
++		int ret;
++
++		if (info.pair >= npairs) {
++			info.pair = 0;
++			base += master->erasesize;
++		}
++
++		wunit = mtd_pairing_info_to_wunit(master, &info);
++		pos = mtd_wunit_to_offset(mtd, base, wunit);
++
++		adjops.len = ops->len - ops->retlen;
++		if (adjops.len > mtd->writesize - pageofs)
++			adjops.len = mtd->writesize - pageofs;
++
++		adjops.ooblen = ops->ooblen - ops->oobretlen;
++		if (adjops.ooblen > oobavail - adjops.ooboffs)
++			adjops.ooblen = oobavail - adjops.ooboffs;
++
++		if (read) {
++			ret = mtd_read_oob_std(mtd, pos + pageofs, &adjops);
++			if (ret > 0)
++				max_bitflips = max(max_bitflips, ret);
++		} else {
++			ret = mtd_write_oob_std(mtd, pos + pageofs, &adjops);
++		}
++
++		if (ret < 0)
++			return ret;
++
++		max_bitflips = max(max_bitflips, ret);
++		ops->retlen += adjops.retlen;
++		ops->oobretlen += adjops.oobretlen;
++		adjops.datbuf += adjops.retlen;
++		adjops.oobbuf += adjops.oobretlen;
++		adjops.ooboffs = 0;
++		pageofs = 0;
++		info.pair++;
++	}
++
++	return max_bitflips;
++}
++
+ int mtd_read_oob(struct mtd_info *mtd, loff_t from, struct mtd_oob_ops *ops)
+ {
++	struct mtd_info *master = mtd_get_master(mtd);
++	struct mtd_ecc_stats old_stats = master->ecc_stats;
+ 	int ret_code;
++
+ 	ops->retlen = ops->oobretlen = 0;
+ 
+ 	ret_code = mtd_check_oob_ops(mtd, from, ops);
+@@ -1111,14 +1380,15 @@ int mtd_read_oob(struct mtd_info *mtd, loff_t from, struct mtd_oob_ops *ops)
+ 		return ret_code;
+ 
+ 	/* Check the validity of a potential fallback on mtd->_read */
+-	if (!mtd->_read_oob && (!mtd->_read || ops->oobbuf))
++	if (!master->_read_oob && (!master->_read || ops->oobbuf))
+ 		return -EOPNOTSUPP;
+ 
+-	if (mtd->_read_oob)
+-		ret_code = mtd->_read_oob(mtd, from, ops);
++	if (mtd->flags & MTD_SLC_ON_MLC_EMULATION)
++		ret_code = mtd_io_emulated_slc(mtd, from, true, ops);
+ 	else
+-		ret_code = mtd->_read(mtd, from, ops->len, &ops->retlen,
+-				      ops->datbuf);
++		ret_code = mtd_read_oob_std(mtd, from, ops);
++
++	mtd_update_ecc_stats(mtd, master, &old_stats);
+ 
+ 	/*
+ 	 * In cases where ops->datbuf != NULL, mtd->_read_oob() has semantics
+@@ -1137,6 +1407,7 @@ EXPORT_SYMBOL_GPL(mtd_read_oob);
+ int mtd_write_oob(struct mtd_info *mtd, loff_t to,
+ 				struct mtd_oob_ops *ops)
+ {
++	struct mtd_info *master = mtd_get_master(mtd);
+ 	int ret;
+ 
+ 	ops->retlen = ops->oobretlen = 0;
+@@ -1149,14 +1420,14 @@ int mtd_write_oob(struct mtd_info *mtd, loff_t to,
+ 		return ret;
+ 
+ 	/* Check the validity of a potential fallback on mtd->_write */
+-	if (!mtd->_write_oob && (!mtd->_write || ops->oobbuf))
++	if (!master->_write_oob && (!master->_write || ops->oobbuf))
+ 		return -EOPNOTSUPP;
+ 
+-	if (mtd->_write_oob)
+-		return mtd->_write_oob(mtd, to, ops);
+-	else
+-		return mtd->_write(mtd, to, ops->len, &ops->retlen,
+-				   ops->datbuf);
++	if (mtd->flags & MTD_SLC_ON_MLC_EMULATION)
++		return mtd_io_emulated_slc(mtd, to, false, ops);
++
++	return mtd_write_oob_std(mtd, to, ops);
++
+ }
+ EXPORT_SYMBOL_GPL(mtd_write_oob);
+ 
+@@ -1179,15 +1450,17 @@ EXPORT_SYMBOL_GPL(mtd_write_oob);
+ int mtd_ooblayout_ecc(struct mtd_info *mtd, int section,
+ 		      struct mtd_oob_region *oobecc)
+ {
++	struct mtd_info *master = mtd_get_master(mtd);
++
+ 	memset(oobecc, 0, sizeof(*oobecc));
+ 
+-	if (!mtd || section < 0)
++	if (!master || section < 0)
+ 		return -EINVAL;
+ 
+-	if (!mtd->ooblayout || !mtd->ooblayout->ecc)
++	if (!master->ooblayout || !master->ooblayout->ecc)
+ 		return -ENOTSUPP;
+ 
+-	return mtd->ooblayout->ecc(mtd, section, oobecc);
++	return master->ooblayout->ecc(master, section, oobecc);
+ }
+ EXPORT_SYMBOL_GPL(mtd_ooblayout_ecc);
+ 
+@@ -1211,15 +1484,17 @@ EXPORT_SYMBOL_GPL(mtd_ooblayout_ecc);
+ int mtd_ooblayout_free(struct mtd_info *mtd, int section,
+ 		       struct mtd_oob_region *oobfree)
+ {
++	struct mtd_info *master = mtd_get_master(mtd);
++
+ 	memset(oobfree, 0, sizeof(*oobfree));
+ 
+-	if (!mtd || section < 0)
++	if (!master || section < 0)
+ 		return -EINVAL;
+ 
+-	if (!mtd->ooblayout || !mtd->ooblayout->rfree)
++	if (!master->ooblayout || !master->ooblayout->rfree)
+ 		return -ENOTSUPP;
+ 
+-	return mtd->ooblayout->rfree(mtd, section, oobfree);
++	return master->ooblayout->rfree(master, section, oobfree);
+ }
+ EXPORT_SYMBOL_GPL(mtd_ooblayout_free);
+ 
+@@ -1528,60 +1803,69 @@ EXPORT_SYMBOL_GPL(mtd_ooblayout_count_eccbytes);
+ int mtd_get_fact_prot_info(struct mtd_info *mtd, size_t len, size_t *retlen,
+ 			   struct otp_info *buf)
+ {
+-	if (!mtd->_get_fact_prot_info)
++	struct mtd_info *master = mtd_get_master(mtd);
++
++	if (!master->_get_fact_prot_info)
+ 		return -EOPNOTSUPP;
+ 	if (!len)
+ 		return 0;
+-	return mtd->_get_fact_prot_info(mtd, len, retlen, buf);
++	return master->_get_fact_prot_info(master, len, retlen, buf);
+ }
+ EXPORT_SYMBOL_GPL(mtd_get_fact_prot_info);
+ 
+ int mtd_read_fact_prot_reg(struct mtd_info *mtd, loff_t from, size_t len,
+ 			   size_t *retlen, u_char *buf)
+ {
++	struct mtd_info *master = mtd_get_master(mtd);
++
+ 	*retlen = 0;
+-	if (!mtd->_read_fact_prot_reg)
++	if (!master->_read_fact_prot_reg)
+ 		return -EOPNOTSUPP;
+ 	if (!len)
+ 		return 0;
+-	return mtd->_read_fact_prot_reg(mtd, from, len, retlen, buf);
++	return master->_read_fact_prot_reg(master, from, len, retlen, buf);
+ }
+ EXPORT_SYMBOL_GPL(mtd_read_fact_prot_reg);
+ 
+ int mtd_get_user_prot_info(struct mtd_info *mtd, size_t len, size_t *retlen,
+ 			   struct otp_info *buf)
+ {
+-	if (!mtd->_get_user_prot_info)
++	struct mtd_info *master = mtd_get_master(mtd);
++
++	if (!master->_get_user_prot_info)
+ 		return -EOPNOTSUPP;
+ 	if (!len)
+ 		return 0;
+-	return mtd->_get_user_prot_info(mtd, len, retlen, buf);
++	return master->_get_user_prot_info(master, len, retlen, buf);
+ }
+ EXPORT_SYMBOL_GPL(mtd_get_user_prot_info);
+ 
+ int mtd_read_user_prot_reg(struct mtd_info *mtd, loff_t from, size_t len,
+ 			   size_t *retlen, u_char *buf)
+ {
++	struct mtd_info *master = mtd_get_master(mtd);
++
+ 	*retlen = 0;
+-	if (!mtd->_read_user_prot_reg)
++	if (!master->_read_user_prot_reg)
+ 		return -EOPNOTSUPP;
+ 	if (!len)
+ 		return 0;
+-	return mtd->_read_user_prot_reg(mtd, from, len, retlen, buf);
++	return master->_read_user_prot_reg(master, from, len, retlen, buf);
+ }
+ EXPORT_SYMBOL_GPL(mtd_read_user_prot_reg);
+ 
+ int mtd_write_user_prot_reg(struct mtd_info *mtd, loff_t to, size_t len,
+ 			    size_t *retlen, u_char *buf)
+ {
++	struct mtd_info *master = mtd_get_master(mtd);
+ 	int ret;
+ 
+ 	*retlen = 0;
+-	if (!mtd->_write_user_prot_reg)
++	if (!master->_write_user_prot_reg)
+ 		return -EOPNOTSUPP;
+ 	if (!len)
+ 		return 0;
+-	ret = mtd->_write_user_prot_reg(mtd, to, len, retlen, buf);
++	ret = master->_write_user_prot_reg(master, to, len, retlen, buf);
+ 	if (ret)
+ 		return ret;
+ 
+@@ -1595,80 +1879,129 @@ EXPORT_SYMBOL_GPL(mtd_write_user_prot_reg);
+ 
+ int mtd_lock_user_prot_reg(struct mtd_info *mtd, loff_t from, size_t len)
+ {
+-	if (!mtd->_lock_user_prot_reg)
++	struct mtd_info *master = mtd_get_master(mtd);
++
++	if (!master->_lock_user_prot_reg)
+ 		return -EOPNOTSUPP;
+ 	if (!len)
+ 		return 0;
+-	return mtd->_lock_user_prot_reg(mtd, from, len);
++	return master->_lock_user_prot_reg(master, from, len);
+ }
+ EXPORT_SYMBOL_GPL(mtd_lock_user_prot_reg);
+ 
+ /* Chip-supported device locking */
+ int mtd_lock(struct mtd_info *mtd, loff_t ofs, uint64_t len)
+ {
+-	if (!mtd->_lock)
++	struct mtd_info *master = mtd_get_master(mtd);
++
++	if (!master->_lock)
+ 		return -EOPNOTSUPP;
+ 	if (ofs < 0 || ofs > mtd->size || len > mtd->size - ofs)
+ 		return -EINVAL;
+ 	if (!len)
+ 		return 0;
+-	return mtd->_lock(mtd, ofs, len);
++	if (mtd->flags & MTD_SLC_ON_MLC_EMULATION) {
++		ofs = (loff_t)mtd_div_by_eb(ofs, mtd) * master->erasesize;
++		len = (u64)mtd_div_by_eb(len, mtd) * master->erasesize;
++	}
++
++	return master->_lock(master, mtd_get_master_ofs(mtd, ofs), len);
+ }
+ EXPORT_SYMBOL_GPL(mtd_lock);
+ 
+ int mtd_unlock(struct mtd_info *mtd, loff_t ofs, uint64_t len)
+ {
+-	if (!mtd->_unlock)
++	struct mtd_info *master = mtd_get_master(mtd);
++
++	if (!master->_unlock)
+ 		return -EOPNOTSUPP;
+ 	if (ofs < 0 || ofs > mtd->size || len > mtd->size - ofs)
+ 		return -EINVAL;
+ 	if (!len)
+ 		return 0;
+-	return mtd->_unlock(mtd, ofs, len);
++	if (mtd->flags & MTD_SLC_ON_MLC_EMULATION) {
++		ofs = (loff_t)mtd_div_by_eb(ofs, mtd) * master->erasesize;
++		len = (u64)mtd_div_by_eb(len, mtd) * master->erasesize;
++	}
++
++	return master->_unlock(master, mtd_get_master_ofs(mtd, ofs), len);
+ }
+ EXPORT_SYMBOL_GPL(mtd_unlock);
+ 
+ int mtd_is_locked(struct mtd_info *mtd, loff_t ofs, uint64_t len)
+ {
+-	if (!mtd->_is_locked)
++	struct mtd_info *master = mtd_get_master(mtd);
++
++	if (!master->_is_locked)
+ 		return -EOPNOTSUPP;
+ 	if (ofs < 0 || ofs > mtd->size || len > mtd->size - ofs)
+ 		return -EINVAL;
+ 	if (!len)
+ 		return 0;
+-	return mtd->_is_locked(mtd, ofs, len);
++	if (mtd->flags & MTD_SLC_ON_MLC_EMULATION) {
++		ofs = (loff_t)mtd_div_by_eb(ofs, mtd) * master->erasesize;
++		len = (u64)mtd_div_by_eb(len, mtd) * master->erasesize;
++	}
++
++	return master->_is_locked(master, mtd_get_master_ofs(mtd, ofs), len);
+ }
+ EXPORT_SYMBOL_GPL(mtd_is_locked);
+ 
+ int mtd_block_isreserved(struct mtd_info *mtd, loff_t ofs)
+ {
++	struct mtd_info *master = mtd_get_master(mtd);
++
+ 	if (ofs < 0 || ofs > mtd->size)
+ 		return -EINVAL;
+-	if (!mtd->_block_isreserved)
++	if (!master->_block_isreserved)
+ 		return 0;
+-	return mtd->_block_isreserved(mtd, ofs);
++	if (mtd->flags & MTD_SLC_ON_MLC_EMULATION)
++		ofs = (loff_t)mtd_div_by_eb(ofs, mtd) * master->erasesize;
++
++	return master->_block_isreserved(master, mtd_get_master_ofs(mtd, ofs));
+ }
+ EXPORT_SYMBOL_GPL(mtd_block_isreserved);
+ 
+ int mtd_block_isbad(struct mtd_info *mtd, loff_t ofs)
+ {
++	struct mtd_info *master = mtd_get_master(mtd);
++
+ 	if (ofs < 0 || ofs > mtd->size)
+ 		return -EINVAL;
+-	if (!mtd->_block_isbad)
++	if (!master->_block_isbad)
+ 		return 0;
+-	return mtd->_block_isbad(mtd, ofs);
++	if (mtd->flags & MTD_SLC_ON_MLC_EMULATION)
++		ofs = (loff_t)mtd_div_by_eb(ofs, mtd) * master->erasesize;
++
++	return master->_block_isbad(master, mtd_get_master_ofs(mtd, ofs));
+ }
+ EXPORT_SYMBOL_GPL(mtd_block_isbad);
+ 
+ int mtd_block_markbad(struct mtd_info *mtd, loff_t ofs)
+ {
+-	if (!mtd->_block_markbad)
++	struct mtd_info *master = mtd_get_master(mtd);
++	int ret;
++
++	if (!master->_block_markbad)
+ 		return -EOPNOTSUPP;
+ 	if (ofs < 0 || ofs > mtd->size)
+ 		return -EINVAL;
+ 	if (!(mtd->flags & MTD_WRITEABLE))
+ 		return -EROFS;
+-	return mtd->_block_markbad(mtd, ofs);
++
++	if (mtd->flags & MTD_SLC_ON_MLC_EMULATION)
++		ofs = (loff_t)mtd_div_by_eb(ofs, mtd) * master->erasesize;
++
++	ret = master->_block_markbad(master, mtd_get_master_ofs(mtd, ofs));
++	if (ret)
++		return ret;
++
++	while (mtd->parent) {
++		mtd->ecc_stats.badblocks++;
++		mtd = mtd->parent;
++	}
++
++	return 0;
+ }
+ EXPORT_SYMBOL_GPL(mtd_block_markbad);
+ 
+@@ -1719,12 +2052,17 @@ static int default_mtd_writev(struct mtd_info *mtd, const struct kvec *vecs,
+ int mtd_writev(struct mtd_info *mtd, const struct kvec *vecs,
+ 	       unsigned long count, loff_t to, size_t *retlen)
+ {
++	struct mtd_info *master = mtd_get_master(mtd);
++
+ 	*retlen = 0;
+ 	if (!(mtd->flags & MTD_WRITEABLE))
+ 		return -EROFS;
+-	if (!mtd->_writev)
++
++	if (!master->_writev)
+ 		return default_mtd_writev(mtd, vecs, count, to, retlen);
+-	return mtd->_writev(mtd, vecs, count, to, retlen);
++
++	return master->_writev(master, vecs, count,
++			       mtd_get_master_ofs(mtd, to), retlen);
+ }
+ EXPORT_SYMBOL_GPL(mtd_writev);
+ 
+diff --git a/drivers/mtd/mtdcore.h b/drivers/mtd/mtdcore.h
+index 1d181a1045..73f8f21271 100644
+--- a/drivers/mtd/mtdcore.h
++++ b/drivers/mtd/mtdcore.h
+@@ -10,7 +10,6 @@ int del_mtd_device(struct mtd_info *mtd);
+ int add_mtd_partitions(struct mtd_info *, const struct mtd_partition *, int);
+ int del_mtd_partitions(struct mtd_info *);
+ int parse_mtd_partitions(struct mtd_info *master, const char * const *types,
+-			 struct mtd_partition **pparts,
+ 			 struct mtd_part_parser_data *data);
+ 
+ int __init init_mtdchar(void);
+diff --git a/drivers/mtd/mtdpart.c b/drivers/mtd/mtdpart.c
+index aa58f722da..a686271839 100644
+--- a/drivers/mtd/mtdpart.c
++++ b/drivers/mtd/mtdpart.c
+@@ -148,6 +148,12 @@ static int mtd_parse_partition(const char **_mtdparts,
+ 		mtdparts += 2;
+ 	}
+ 
++	/* if slc is found use emulated SLC mode on this partition*/
++	if (!strncmp(mtdparts, "slc", 3)) {
++		partition->add_flags |= MTD_SLC_ON_MLC_EMULATION;
++		mtdparts += 3;
++	}
++
+ 	/* Check for a potential next partition definition */
+ 	if (*mtdparts == ',') {
+ 		if (partition->size == MTD_SIZE_REMAINING) {
+@@ -591,6 +597,7 @@ static struct mtd_info *allocate_partition(struct mtd_info *master,
+ 	/* set up the MTD object for this partition */
+ 	slave->type = master->type;
+ 	slave->flags = master->flags & ~part->mask_flags;
++	slave->flags |= part->add_flags;
+ 	slave->size = part->size;
+ 	slave->writesize = master->writesize;
+ 	slave->writebufsize = master->writebufsize;
+diff --git a/drivers/mtd/nand/raw/nand_base.c b/drivers/mtd/nand/raw/nand_base.c
+index b1fd779884..097b82c808 100644
+--- a/drivers/mtd/nand/raw/nand_base.c
++++ b/drivers/mtd/nand/raw/nand_base.c
+@@ -105,6 +105,56 @@ static int nand_do_write_oob(struct mtd_info *mtd, loff_t to,
+  */
+ DEFINE_LED_TRIGGER(nand_led_trigger);
+ 
++static int nand_pairing_dist3_get_info(struct mtd_info *mtd, int page,
++				       struct mtd_pairing_info *info)
++{
++	int lastpage = (mtd->erasesize / mtd->writesize) - 1;
++	int dist = 3;
++
++	if (page == lastpage)
++		dist = 2;
++
++	if (!page || (page & 1)) {
++		info->group = 0;
++		info->pair = (page + 1) / 2;
++	} else {
++		info->group = 1;
++		info->pair = (page + 1 - dist) / 2;
++	}
++
++	return 0;
++}
++
++static int nand_pairing_dist3_get_wunit(struct mtd_info *mtd,
++					const struct mtd_pairing_info *info)
++{
++	int lastpair = ((mtd->erasesize / mtd->writesize) - 1) / 2;
++	int page = info->pair * 2;
++	int dist = 3;
++
++	if (!info->group && !info->pair)
++		return 0;
++
++	if (info->pair == lastpair && info->group)
++		dist = 2;
++
++	if (!info->group)
++		page--;
++	else if (info->pair)
++		page += dist - 1;
++
++	if (page >= mtd->erasesize / mtd->writesize)
++		return -EINVAL;
++
++	return page;
++}
++
++const struct mtd_pairing_scheme dist3_pairing_scheme = {
++	.ngroups = 2,
++	.get_info = nand_pairing_dist3_get_info,
++	.get_wunit = nand_pairing_dist3_get_wunit,
++};
++
+ static int check_offs_len(struct mtd_info *mtd,
+ 					loff_t ofs, uint64_t len)
+ {
+@@ -4496,6 +4546,23 @@ ident_done:
+ 			break;
+ 	}
+ 
++	/* Enable slc-mode on TC58TEG5DCLTA00 to match upstream Linux */
++	if (id_data[0] == NAND_MFR_TOSHIBA && id_data[1] == 0xd7
++	    && id_data[2] == 0x84 && id_data[3] == 0x93
++	    && id_data[4] == 0x72 && id_data[5] == 0x51
++	    && id_data[6] == 0x08 && id_data[7] == 0x04) {
++		chip->options |= NAND_NEED_SCRAMBLING;
++		mtd_set_pairing_scheme(mtd, &dist3_pairing_scheme);
++	}
++
++	/* Enable slc-mode on H27UCG8T2ETR to enable upstream Linux */
++	if (id_data[0] == NAND_MFR_HYNIX && id_data[1] == 0xde
++	    && id_data[2] == 0x14 && id_data[3] == 0xa7
++	    && id_data[4] == 0x42 && id_data[5] == 0x4a) {
++		chip->options |= NAND_NEED_SCRAMBLING;
++		mtd_set_pairing_scheme(mtd, &dist3_pairing_scheme);
++	}
++
+ 	if (chip->options & NAND_BUSWIDTH_AUTO) {
+ 		WARN_ON(chip->options & NAND_BUSWIDTH_16);
+ 		chip->options |= busw;
+diff --git a/include/configs/sunxi-common.h b/include/configs/sunxi-common.h
+index 958b850da4..2ee241fe9b 100644
+--- a/include/configs/sunxi-common.h
++++ b/include/configs/sunxi-common.h
+@@ -462,6 +462,8 @@ extern int soft_i2c_gpio_scl;
+ 	"uuid_gpt_system=" UUID_GPT_SYSTEM "\0" \
+ 	"partitions=" PARTS_DEFAULT "\0" \
+ 	BOOTCMD_SUNXI_COMPAT \
++	"bootubivol=rootfs\0" \
++	"bootubipart=rootfs\0" \
+ 	BOOTENV
+ 
+ #else /* ifndef CONFIG_SPL_BUILD */
+diff --git a/include/linux/mtd/mtd.h b/include/linux/mtd/mtd.h
+index 3b302fb8c3..f55e469f75 100644
+--- a/include/linux/mtd/mtd.h
++++ b/include/linux/mtd/mtd.h
+@@ -133,6 +133,82 @@ struct mtd_ooblayout_ops {
+ 		     struct mtd_oob_region *oobfree);
+ };
+ 
++/**
++ * struct mtd_pairing_info - page pairing information
++ *
++ * @pair: pair id
++ * @group: group id
++ *
++ * The term "pair" is used here, even though TLC NANDs might group pages by 3
++ * (3 bits in a single cell). A pair should regroup all pages that are sharing
++ * the same cell. Pairs are then indexed in ascending order.
++ *
++ * @group is defining the position of a page in a given pair. It can also be
++ * seen as the bit position in the cell: page attached to bit 0 belongs to
++ * group 0, page attached to bit 1 belongs to group 1, etc.
++ *
++ * Example:
++ * The H27UCG8T2BTR-BC datasheet describes the following pairing scheme:
++ *
++ *		group-0		group-1
++ *
++ *  pair-0	page-0		page-4
++ *  pair-1	page-1		page-5
++ *  pair-2	page-2		page-8
++ *  ...
++ *  pair-127	page-251	page-255
++ *
++ *
++ * Note that the "group" and "pair" terms were extracted from Samsung and
++ * Hynix datasheets, and might be referenced under other names in other
++ * datasheets (Micron is describing this concept as "shared pages").
++ */
++struct mtd_pairing_info {
++	int pair;
++	int group;
++};
++
++/**
++ * struct mtd_pairing_scheme - page pairing scheme description
++ *
++ * @ngroups: number of groups. Should be related to the number of bits
++ *	     per cell.
++ * @get_info: converts a write-unit (page number within an erase block) into
++ *	      mtd_pairing information (pair + group). This function should
++ *	      fill the info parameter based on the wunit index or return
++ *	      -EINVAL if the wunit parameter is invalid.
++ * @get_wunit: converts pairing information into a write-unit (page) number.
++ *	       This function should return the wunit index pointed by the
++ *	       pairing information described in the info argument. It should
++ *	       return -EINVAL, if there's no wunit corresponding to the
++ *	       passed pairing information.
++ *
++ * See mtd_pairing_info documentation for a detailed explanation of the
++ * pair and group concepts.
++ *
++ * The mtd_pairing_scheme structure provides a generic solution to represent
++ * NAND page pairing scheme. Instead of exposing two big tables to do the
++ * write-unit <-> (pair + group) conversions, we ask the MTD drivers to
++ * implement the ->get_info() and ->get_wunit() functions.
++ *
++ * MTD users will then be able to query these information by using the
++ * mtd_pairing_info_to_wunit() and mtd_wunit_to_pairing_info() helpers.
++ *
++ * @ngroups is here to help MTD users iterating over all the pages in a
++ * given pair. This value can be retrieved by MTD users using the
++ * mtd_pairing_groups() helper.
++ *
++ * Examples are given in the mtd_pairing_info_to_wunit() and
++ * mtd_wunit_to_pairing_info() documentation.
++ */
++struct mtd_pairing_scheme {
++	int ngroups;
++	int (*get_info)(struct mtd_info *mtd, int wunit,
++			struct mtd_pairing_info *info);
++	int (*get_wunit)(struct mtd_info *mtd,
++			 const struct mtd_pairing_info *info);
++};
++
+ /*
+  * Internal ECC layout control structure. For historical reasons, there is a
+  * similar, smaller struct nand_ecclayout_user (in mtd-abi.h) that is retained
+@@ -148,6 +224,43 @@ struct nand_ecclayout {
+ 
+ struct module;	/* only needed for owner field in mtd_info */
+ 
++/**
++ * struct mtd_part - MTD partition specific fields
++ *
++ * @node: list node used to add an MTD partition to the parent partition list
++ * @offset: offset of the partition relatively to the parent offset
++ * @size: partition size. Should be equal to mtd->size unless
++ *	  MTD_SLC_ON_MLC_EMULATION is set
++ * @flags: original flags (before the mtdpart logic decided to tweak them based
++ *	   on flash constraints, like eraseblock/pagesize alignment)
++ *
++ * This struct is embedded in mtd_info and contains partition-specific
++ * properties/fields.
++ */
++struct mtd_part {
++	struct list_head node;
++	u64 offset;
++	u64 size;
++	u32 flags;
++};
++
++/**
++ * struct mtd_master - MTD master specific fields
++ *
++ * @partitions_lock: lock protecting accesses to the partition list. Protects
++ *		     not only the master partition list, but also all
++ *		     sub-partitions.
++ * @suspended: et to 1 when the device is suspended, 0 otherwise
++ *
++ * This struct is embedded in mtd_info and contains master-specific
++ * properties/fields. The master is the root MTD device from the MTD partition
++ * point of view.
++ */
++struct mtd_master {
++	struct mutex partitions_lock;
++	unsigned int suspended : 1;
++};
++
+ struct mtd_info {
+ 	u_char type;
+ 	uint32_t flags;
+@@ -211,6 +324,9 @@ struct mtd_info {
+ 	/* OOB layout description */
+ 	const struct mtd_ooblayout_ops *ooblayout;
+ 
++	/* NAND pairing scheme, only provided for MLC/TLC NANDs */
++	const struct mtd_pairing_scheme *pairing;
++
+ 	/* ECC layout structure pointer - read only! */
+ 	struct nand_ecclayout *ecclayout;
+ 
+@@ -329,8 +445,31 @@ struct mtd_info {
+ 	 * MTD device can itself be a partition).
+ 	 */
+ 	struct list_head partitions;
++
++	union {
++		struct mtd_part part;
++		struct mtd_master master;
++	};
+ };
+ 
++static inline struct mtd_info *mtd_get_master(struct mtd_info *mtd)
++{
++	while (mtd->parent)
++		mtd = mtd->parent;
++
++	return mtd;
++}
++
++static inline u64 mtd_get_master_ofs(struct mtd_info *mtd, u64 ofs)
++{
++	while (mtd->parent) {
++		ofs += mtd->offset;
++		mtd = mtd->parent;
++	}
++
++	return ofs;
++}
++
+ #if IS_ENABLED(CONFIG_DM)
+ static inline void mtd_set_ofnode(struct mtd_info *mtd, ofnode node)
+ {
+@@ -391,11 +530,22 @@ static inline void mtd_set_ooblayout(struct mtd_info *mtd,
+ 	mtd->ooblayout = ooblayout;
+ }
+ 
++static inline void mtd_set_pairing_scheme(struct mtd_info *mtd,
++				const struct mtd_pairing_scheme *pairing)
++{
++	mtd->pairing = pairing;
++}
++
+ static inline u32 mtd_oobavail(struct mtd_info *mtd, struct mtd_oob_ops *ops)
+ {
+ 	return ops->mode == MTD_OPS_AUTO_OOB ? mtd->oobavail : mtd->oobsize;
+ }
+ 
++int mtd_wunit_to_pairing_info(struct mtd_info *mtd, int wunit,
++			      struct mtd_pairing_info *info);
++int mtd_pairing_info_to_wunit(struct mtd_info *mtd,
++			      const struct mtd_pairing_info *info);
++int mtd_pairing_groups(struct mtd_info *mtd);
+ int mtd_erase(struct mtd_info *mtd, struct erase_info *instr);
+ #ifndef __UBOOT__
+ int mtd_point(struct mtd_info *mtd, loff_t from, size_t len, size_t *retlen,
+@@ -433,8 +583,10 @@ int mtd_writev(struct mtd_info *mtd, const struct kvec *vecs,
+ 
+ static inline void mtd_sync(struct mtd_info *mtd)
+ {
+-	if (mtd->_sync)
+-		mtd->_sync(mtd);
++	struct mtd_info *master = mtd_get_master(mtd);
++
++	if (master->_sync)
++		master->_sync(master);
+ }
+ 
+ int mtd_lock(struct mtd_info *mtd, loff_t ofs, uint64_t len);
+@@ -447,13 +599,15 @@ int mtd_block_markbad(struct mtd_info *mtd, loff_t ofs);
+ #ifndef __UBOOT__
+ static inline int mtd_suspend(struct mtd_info *mtd)
+ {
+-	return mtd->_suspend ? mtd->_suspend(mtd) : 0;
++	struct mtd_info *master = mtd_get_master(mtd);
++	return master->_suspend ? master->_suspend(master) : 0;
+ }
+ 
+ static inline void mtd_resume(struct mtd_info *mtd)
+ {
+-	if (mtd->_resume)
+-		mtd->_resume(mtd);
++	struct mtd_info *master = mtd_get_master(mtd);
++	if (master->_resume)
++		master->_resume(master);
+ }
+ #endif
+ 
+@@ -487,9 +641,29 @@ static inline uint32_t mtd_mod_by_ws(uint64_t sz, struct mtd_info *mtd)
+ 	return do_div(sz, mtd->writesize);
+ }
+ 
++static inline int mtd_wunit_per_eb(struct mtd_info *mtd)
++{
++	struct mtd_info *master = mtd_get_master(mtd);
++
++	return master->erasesize / mtd->writesize;
++}
++
++static inline int mtd_offset_to_wunit(struct mtd_info *mtd, loff_t offs)
++{
++	return mtd_div_by_ws(mtd_mod_by_eb(offs, mtd), mtd);
++}
++
++static inline loff_t mtd_wunit_to_offset(struct mtd_info *mtd, loff_t base,
++					 int wunit)
++{
++	return base + (wunit * mtd->writesize);
++}
++
+ static inline int mtd_has_oob(const struct mtd_info *mtd)
+ {
+-	return mtd->_read_oob && mtd->_write_oob;
++	struct mtd_info *master = mtd_get_master((struct mtd_info *)mtd);
++
++	return master->_read_oob && master->_write_oob;
+ }
+ 
+ static inline int mtd_type_is_nand(const struct mtd_info *mtd)
+@@ -499,7 +673,9 @@ static inline int mtd_type_is_nand(const struct mtd_info *mtd)
+ 
+ static inline int mtd_can_have_bb(const struct mtd_info *mtd)
+ {
+-	return !!mtd->_block_isbad;
++	struct mtd_info *master = mtd_get_master((struct mtd_info *)mtd);
++
++	return !!master->_block_isbad;
+ }
+ 
+ 	/* Kernel-side ioctl definitions */
+diff --git a/include/linux/mtd/partitions.h b/include/linux/mtd/partitions.h
+index 3822237f2a..34eec5f67a 100644
+--- a/include/linux/mtd/partitions.h
++++ b/include/linux/mtd/partitions.h
+@@ -20,6 +20,12 @@
+  *
+  * For each partition, these fields are available:
+  * name: string that will be used to label the partition's MTD device.
++ * types: some partitions can be containers using specific format to describe
++ *	embedded subpartitions / volumes. E.g. many home routers use "firmware"
++ *	partition that contains at least kernel and rootfs. In such case an
++ *	extra parser is needed that will detect these dynamic partitions and
++ *	report them to the MTD subsystem. If set this property stores an array
++ *	of parser names to use when looking for subpartitions.
+  * size: the partition size; if defined as MTDPART_SIZ_FULL, the partition
+  * 	will extend to the end of the master MTD device.
+  * offset: absolute starting position within the master MTD device; if
+@@ -31,6 +37,7 @@
+  * 	master MTD flag set for the corresponding MTD partition.
+  * 	For example, to force a read-only partition, simply adding
+  * 	MTD_WRITEABLE to the mask_flags will do the trick.
++ * add_flags: contains flags to add to the parent flags
+  *
+  * Note: writeable partitions require their size and offset be
+  * erasesize aligned (e.g. use MTDPART_OFS_NEXTBLK).
+@@ -38,9 +45,11 @@
+ 
+ struct mtd_partition {
+ 	const char *name;		/* identifier string */
++	const char *const *types;	/* names of parsers to use if any */
+ 	uint64_t size;			/* partition size */
+ 	uint64_t offset;		/* offset within the master MTD space */
+ 	uint32_t mask_flags;		/* master MTD flags to mask out for this partition */
++	uint32_t add_flags;		/* flags to add to the partition */
+ 	struct nand_ecclayout *ecclayout;	/* out of band layout for this partition (NAND only) */
+ };
+ 
+@@ -53,7 +62,6 @@ struct mtd_partition {
+ struct mtd_info;
+ struct device_node;
+ 
+-#ifndef __UBOOT__
+ /**
+  * struct mtd_part_parser_data - used to pass data to MTD partition parsers.
+  * @origin: for RedBoot, start address of MTD device
+@@ -64,7 +72,6 @@ struct mtd_part_parser_data {
+ 	struct device_node *of_node;
+ };
+ 
+-
+ /*
+  * Functions dealing with the various ways of partitioning the space
+  */
+@@ -73,13 +80,22 @@ struct mtd_part_parser {
+ 	struct list_head list;
+ 	struct module *owner;
+ 	const char *name;
+-	int (*parse_fn)(struct mtd_info *, struct mtd_partition **,
++	const struct udevice_id *of_match_table;
++	int (*parse_fn)(struct mtd_info *, const struct mtd_partition **,
+ 			struct mtd_part_parser_data *);
++	void (*cleanup)(const struct mtd_partition *pparts, int nr_parts);
++};
++
++/* Container for passing around a set of parsed partitions */
++struct mtd_partitions {
++	const struct mtd_partition *parts;
++	int nr_parts;
++	const struct mtd_part_parser *parser;
+ };
+ 
++
+ extern void register_mtd_parser(struct mtd_part_parser *parser);
+ extern void deregister_mtd_parser(struct mtd_part_parser *parser);
+-#endif
+ 
+ int mtd_add_partition(struct mtd_info *master, const char *name,
+ 		      long long offset, long long length);
+diff --git a/include/mtd/mtd-abi.h b/include/mtd/mtd-abi.h
+index 8d9761050f..2f6ce18795 100644
+--- a/include/mtd/mtd-abi.h
++++ b/include/mtd/mtd-abi.h
+@@ -94,6 +94,7 @@ struct mtd_write_req {
+ #define MTD_BIT_WRITEABLE	0x800	/* Single bits can be flipped */
+ #define MTD_NO_ERASE		0x1000	/* No erase necessary */
+ #define MTD_POWERUP_LOCK	0x2000	/* Always locked after reset */
++#define MTD_SLC_ON_MLC_EMULATION 0x4000	/* Emulate SLC behavior on MLC NANDs */
+ 
+ /* Some common devices / combinations of capabilities */
+ #define MTD_CAP_ROM		0
+-- 
+2.30.2
+

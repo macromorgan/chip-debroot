@@ -1,0 +1,31 @@
+From 7328143775f99a28f60eb9ea90410b29a3da8a61 Mon Sep 17 00:00:00 2001
+From: Chris Morgan <macromorgan@hotmail.com>
+Date: Thu, 16 Dec 2021 12:52:13 -0600
+Subject: [PATCH] w1: Loosen timings for w1 reset
+
+Without loosening the timings for the reset of the w1 chip, DIP
+auto-detection does not work reliably on cold-boot.
+
+Signed-off-By: Chris Morgan <macromorgan@hotmail.com>
+---
+ drivers/w1/w1-gpio.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/w1/w1-gpio.c b/drivers/w1/w1-gpio.c
+index 9346f810ce..5565de2a92 100644
+--- a/drivers/w1/w1-gpio.c
++++ b/drivers/w1/w1-gpio.c
+@@ -22,8 +22,8 @@
+ #define W1_TIMING_E	9
+ #define W1_TIMING_F	55
+ #define W1_TIMING_G	0
+-#define W1_TIMING_H	480
+-#define W1_TIMING_I	70
++#define W1_TIMING_H	600
++#define W1_TIMING_I	100
+ #define W1_TIMING_J	410
+ 
+ struct w1_gpio_pdata {
+-- 
+2.30.2
+
