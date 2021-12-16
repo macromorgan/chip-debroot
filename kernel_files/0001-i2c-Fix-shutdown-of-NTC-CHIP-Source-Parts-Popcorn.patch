@@ -1,0 +1,47 @@
+From 47ada99782c223a580e8ed1b1b938cc593f60c3e Mon Sep 17 00:00:00 2001
+From: Chris Morgan <macromorgan@hotmail.com>
+Date: Thu, 16 Dec 2021 13:57:45 -0600
+Subject: [PATCH] i2c: Fix shutdown of NTC CHIP/Source Parts Popcorn
+
+The shutdown function in the i2c driver causes the device to lock up
+during shutdown. Removing it allows the device to shutdown cleanly.
+
+Note that you will still get a rather scary looking warning message
+at shutdown due to no implementation of an atomic write in the driver.
+This is normal and not a big deal (for our purposes).
+
+Signed-off-By: Chris Morgan <macromorgan@hotmail.com>
+---
+ drivers/i2c/busses/i2c-mv64xxx.c | 9 ---------
+ 1 file changed, 9 deletions(-)
+
+diff --git a/drivers/i2c/busses/i2c-mv64xxx.c b/drivers/i2c/busses/i2c-mv64xxx.c
+index 5c8e94b6cdb5..424c53e4c513 100644
+--- a/drivers/i2c/busses/i2c-mv64xxx.c
++++ b/drivers/i2c/busses/i2c-mv64xxx.c
+@@ -1047,14 +1047,6 @@ mv64xxx_i2c_remove(struct platform_device *pd)
+ 	return 0;
+ }
+ 
+-static void
+-mv64xxx_i2c_shutdown(struct platform_device *pd)
+-{
+-	pm_runtime_disable(&pd->dev);
+-	if (!pm_runtime_status_suspended(&pd->dev))
+-		mv64xxx_i2c_runtime_suspend(&pd->dev);
+-}
+-
+ static const struct dev_pm_ops mv64xxx_i2c_pm_ops = {
+ 	SET_RUNTIME_PM_OPS(mv64xxx_i2c_runtime_suspend,
+ 			   mv64xxx_i2c_runtime_resume, NULL)
+@@ -1065,7 +1057,6 @@ static const struct dev_pm_ops mv64xxx_i2c_pm_ops = {
+ static struct platform_driver mv64xxx_i2c_driver = {
+ 	.probe	= mv64xxx_i2c_probe,
+ 	.remove	= mv64xxx_i2c_remove,
+-	.shutdown = mv64xxx_i2c_shutdown,
+ 	.driver	= {
+ 		.name	= MV64XXX_I2C_CTLR_NAME,
+ 		.pm     = &mv64xxx_i2c_pm_ops,
+-- 
+2.30.2
+

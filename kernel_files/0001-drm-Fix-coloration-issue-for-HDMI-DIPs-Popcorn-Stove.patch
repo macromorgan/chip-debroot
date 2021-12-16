@@ -1,0 +1,29 @@
+From 77858265f5826addbd6dd1590b7d558d1a775e22 Mon Sep 17 00:00:00 2001
+From: Chris Morgan <macromorgan@hotmail.com>
+Date: Thu, 16 Dec 2021 14:01:03 -0600
+Subject: [PATCH] drm: Fix coloration issue for HDMI DIPs/Popcorn Stovetop
+
+This fixes the HDMI color for the HDMI DIP and Popcorn Stovetop.
+Without this patch the DIP works, but the HDMI colors are all off.
+
+Signed-off-By: Chris Morgan <macromorgan@hotmail.com>
+---
+ drivers/gpu/drm/bridge/chrontel-ch7033.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/bridge/chrontel-ch7033.c b/drivers/gpu/drm/bridge/chrontel-ch7033.c
+index 486f405c2e16..4ae3affa837f 100644
+--- a/drivers/gpu/drm/bridge/chrontel-ch7033.c
++++ b/drivers/gpu/drm/bridge/chrontel-ch7033.c
+@@ -398,7 +398,7 @@ static void ch7033_bridge_mode_set(struct drm_bridge *bridge,
+ 	regmap_write(priv->regmap, 0x16, vsynclen);
+ 
+ 	/* Input color swap. */
+-	regmap_update_bits(priv->regmap, 0x18, SWAP, BYTE_SWAP_BGR);
++	regmap_update_bits(priv->regmap, 0x18, SWAP, BYTE_SWAP_RGB);
+ 
+ 	/* Input clock and sync polarity. */
+ 	regmap_update_bits(priv->regmap, 0x19, 0x1, mode->clock >> 16);
+-- 
+2.30.2
+
