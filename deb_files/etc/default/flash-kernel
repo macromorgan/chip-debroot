@@ -1,2 +1,2 @@
 LINUX_KERNEL_CMDLINE="splash plymouth.ignore-serial-consoles"
-LINUX_KERNEL_CMDLINE_DEFAULTS="ubi.mtd=3 root=ubi0:rootfs rw rootfstype=ubifs rootwait cmdlinepart.mtdparts=1c03000.nand-controller:0x400000(SPL)ro,0x400000(SPL.backup)ro,0x400000(U-Boot)ro,-(rootfs)slc"
+LINUX_KERNEL_CMDLINE_DEFAULTS="ubi.mtd=4 root=ubi0:rootfs rw rootfstype=ubifs rootwait cmdlinepart.mtdparts=1c03000.nand-controller:0x400000(SPL)ro,0x400000(SPL.backup)ro,0x400000(U-Boot)ro,0x400000(U-Boot.backup)ro,-(rootfs)slc"
