@@ -1,0 +1,384 @@
+/*
+ * Copyright 2015 Free Electrons
+ * Copyright 2015 NextThing Co
+ *
+ * Maxime Ripard <maxime.ripard@free-electrons.com>
+ *
+ * This file is dual-licensed: you can use it either under the terms
+ * of the GPL or the X11 license, at your option. Note that this dual
+ * licensing only applies to this file, and not this project as a
+ * whole.
+ *
+ *  a) This file is free software; you can redistribute it and/or
+ *     modify it under the terms of the GNU General Public License as
+ *     published by the Free Software Foundation; either version 2 of the
+ *     License, or (at your option) any later version.
+ *
+ *     This file is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU General Public License for more details.
+ *
+ * Or, alternatively,
+ *
+ *  b) Permission is hereby granted, free of charge, to any person
+ *     obtaining a copy of this software and associated documentation
+ *     files (the "Software"), to deal in the Software without
+ *     restriction, including without limitation the rights to use,
+ *     copy, modify, merge, publish, distribute, sublicense, and/or
+ *     sell copies of the Software, and to permit persons to whom the
+ *     Software is furnished to do so, subject to the following
+ *     conditions:
+ *
+ *     The above copyright notice and this permission notice shall be
+ *     included in all copies or substantial portions of the Software.
+ *
+ *     THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ *     EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+ *     OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+ *     NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+ *     HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+ *     WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ *     FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+ *     OTHER DEALINGS IN THE SOFTWARE.
+ */
+
+/dts-v1/;
+#include "sun5i-r8.dtsi"
+#include "sunxi-common-regulators.dtsi"
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+
+/ {
+	model = "Source Parts Popcorn";
+	compatible = "sourceparts,popcorn", "nextthing,chip",
+		     "allwinner,sun5i-r8", "allwinner,sun5i-a13";
+
+	aliases {
+		i2c0 = &i2c0;
+		i2c1 = &i2c1;
+		i2c2 = &i2c2;
+		mmc0 = &mmc2;
+		mmc1 = &mmc0;
+		serial0 = &uart1;
+		serial1 = &uart3;
+		spi0 = &spi2;
+	};
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+	};
+
+	leds {
+		compatible = "gpio-leds";
+
+		status {
+			label = "chip:white:status";
+			gpios = <&axp_gpio 2 GPIO_ACTIVE_HIGH>;
+			default-state = "on";
+		};
+	};
+
+	mmc0_pwrseq: mmc0_pwrseq {
+		compatible = "mmc-pwrseq-simple";
+		reset-gpios = <&pio 2 19 GPIO_ACTIVE_LOW>; /* PC19 */
+	};
+
+	onewire {
+		compatible = "w1-gpio";
+		gpios = <&pio 3 2 (GPIO_ACTIVE_HIGH | GPIO_PULL_UP)>; /* PD2 */
+	};
+
+	reg_usb_vbus: usb-vbus {
+                compatible = "regulator-fixed";
+                regulator-name = "usb0-vbus";
+                regulator-min-microvolt = <5000000>;
+                regulator-max-microvolt = <5000000>;
+                enable-active-high;
+		regulator-always-on;
+		regulator-boot-on;
+                gpio = <&pio 1 10 GPIO_ACTIVE_HIGH>;
+                status = "okay";
+        };
+};
+
+&be0 {
+	status = "okay";
+};
+
+&codec {
+	status = "okay";
+};
+
+&cpu0 {
+	cpu-supply = <&reg_dcdc2>;
+	operating-points =
+		/* kHz    uV */
+		<1008000 1400000>,
+		<912000  1350000>,
+		<864000  1300000>,
+		<624000  1200000>,
+		<576000  1200000>,
+		<432000  1200000>;
+};
+
+&ehci0 {
+	status = "okay";
+};
+
+&i2c0 {
+	status = "okay";
+
+	axp209: pmic@34 {
+		reg = <0x34>;
+
+		/*
+		 * The interrupt is routed through the "External Fast
+		 * Interrupt Request" pin (ball G13 of the module)
+		 * directly to the main interrupt controller, without
+		 * any other controller interfering.
+		 */
+		interrupts = <0>;
+	};
+};
+
+#include "axp209.dtsi"
+
+&ac_power_supply {
+	status = "okay";
+};
+
+&axp209 {
+	/* IPSOUT is a fixed 5v that feeds these regulators. */
+	vin2-supply = <&reg_vcc5v0>;
+	vin3-supply = <&reg_vcc5v0>;
+	acin-supply = <&reg_vcc5v0>;
+	ldo24in-supply = <&reg_vcc5v0>;
+	ldo3in-supply = <&reg_vcc5v0>;
+	ldo5in-supply = <&reg_vcc5v0>;
+};
+
+&battery_power_supply {
+	status = "okay";
+};
+
+&fe0 {
+	status = "okay";
+};
+
+&i2c1 {
+	status = "okay";
+};
+
+&i2c2 {
+	status = "okay";
+
+	typec_device: usb-pd@22 {
+		compatible = "ti,tps6598x";
+		reg = <0x22>;
+		interrupts = <6 2 IRQ_TYPE_EDGE_FALLING>; /* PG2 / EINT2 */
+		interrupt-names = "irq";
+		pinctrl-names = "default";
+		pinctrl-0 = <&typec_pins>;
+
+		typec_con0: connector {
+			compatible = "usb-c-connector";
+		};
+	};
+
+	typec_host: usb-pd@26 {
+		compatible = "ti,tps6598x";
+		reg = <0x26>;
+
+		typec_con1: connector {
+			compatible = "usb-c-connector";
+		};
+	};
+};
+
+/* This fixes a bug with upstream */
+&mbus {
+	status = "disabled";
+};
+
+&mmc0 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&mmc0_pins>;
+	vmmc-supply = <&reg_vcc3v3>;
+	mmc-pwrseq = <&mmc0_pwrseq>;
+	bus-width = <4>;
+	non-removable;
+	status = "okay";
+	r8723bs: r8723bs@1 {
+		reg = <1>;
+		interrupt-parent = <&pio>;
+		interrupts = <1 3 IRQ_TYPE_EDGE_FALLING>; /* PB3 / EINT17 */
+		interrupt-names = "host-wake";
+	};
+};
+
+&mmc2 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&mmc2_8bit_pins>;
+	vmmc-supply = <&reg_vcc3v3>;
+	bus-width = <8>;
+	non-removable;
+	status = "okay";
+
+	mmccard: mmccard@0 {
+		reg = <0>;
+		compatible = "mmc-card";
+	};
+};
+
+&ohci0 {
+	status = "okay";
+};
+
+&otg_sram {
+	status = "okay";
+};
+
+&pio {
+	vcc-pb-supply = <&reg_vcc3v3>;
+	vcc-pc-supply = <&reg_vcc3v3>;
+	vcc-pd-supply = <&reg_vcc3v3>;
+	vcc-pe-supply = <&reg_vcc3v3>;
+	vcc-pf-supply = <&reg_vcc3v3>;
+	vcc-pg-supply = <&reg_vcc3v3>;
+
+	mmc0_pins: mmc0-pins {
+		pins = "PF0", "PF1", "PF2", "PF3",
+		       "PF4", "PF5";
+		function = "mmc0";
+		drive-strength = <30>;
+		bias-pull-up;
+	};
+
+	mmc2_8bit_pins: mmc2-8bit-pins {
+		pins = "PC6", "PC7", "PC8", "PC9",
+		       "PC10", "PC11", "PC12", "PC13",
+		       "PC14", "PC15";
+		function = "mmc2";
+		drive-strength = <30>;
+		bias-pull-up;
+	};
+
+	typec_pins: typec-pins {
+		pins = "PC3";
+		function = "gpio_out";
+		bias-pull-down;
+	};
+};
+
+&reg_dcdc2 {
+	regulator-min-microvolt = <1000000>;
+	regulator-max-microvolt = <1400000>;
+	regulator-name = "cpuvdd";
+	regulator-always-on;
+};
+
+&reg_dcdc3 {
+	regulator-min-microvolt = <1000000>;
+	regulator-max-microvolt = <1300000>;
+	regulator-name = "corevdd";
+	regulator-always-on;
+};
+
+&reg_ldo1 {
+	regulator-name = "rtcvdd";
+};
+
+&reg_ldo2 {
+	regulator-min-microvolt = <2700000>;
+	regulator-max-microvolt = <3300000>;
+	regulator-name = "avcc";
+	regulator-always-on;
+};
+
+/*
+ * Both LDO3 and LDO4 are used in parallel to power up the WiFi/BT
+ * Chip.
+ *
+ * If those are not enabled, the SDIO part will not enumerate, and
+ * since there's no way currently to pass DT infos to an SDIO device,
+ * we cannot really do better than this ugly hack for now.
+ */
+&reg_ldo3 {
+	regulator-min-microvolt = <3300000>;
+	regulator-max-microvolt = <3300000>;
+	regulator-name = "vcc-wifi-1";
+	regulator-always-on;
+	regulator-boot-on;
+};
+
+&reg_ldo4 {
+	regulator-min-microvolt = <3300000>;
+	regulator-max-microvolt = <3300000>;
+	regulator-name = "vcc-wifi-2";
+	regulator-always-on;
+	regulator-boot-on;
+};
+
+&reg_ldo5 {
+	regulator-min-microvolt = <1800000>;
+	regulator-max-microvolt = <1800000>;
+	regulator-name = "vcc-1v8";
+};
+
+&reg_usb0_vbus {
+	vin-supply = <&reg_vcc5v0>;*/
+	gpio = <&pio 1 10 GPIO_ACTIVE_HIGH>; /* PB10 */
+	status = "okay";
+};
+
+&spi2 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&spi2_pe_pins>;
+	status = "disabled";
+};
+
+&tcon0 {
+	status = "okay";
+};
+
+&tve0 {
+	status = "okay";
+};
+
+&uart1 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&uart1_pg_pins>;
+	status = "okay";
+};
+
+&uart3 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&uart3_pg_pins>,
+		    <&uart3_cts_rts_pg_pins>;
+	status = "okay";
+
+	bluetooth {
+		compatible = "realtek,rtl8723bs-bt";
+	};
+};
+
+&usb_otg {
+	dr_mode = "otg";
+	status = "okay";
+};
+
+&usb_power_supply {
+	status = "okay";
+};
+
+&usbphy {
+	status = "okay";
+
+	usb0_id_det-gpio = <&pio 6 2 GPIO_ACTIVE_HIGH>; /* PG2 */
+	usb0_vbus_power-supply = <&usb_power_supply>;
+	usb0_vbus-supply = <&reg_usb0_vbus>;
+	usb0_vbus-supply = <&reg_vcc5v0>;
+	usb1_vbus-supply = <&reg_vcc5v0>;
+};
