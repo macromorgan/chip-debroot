@@ -21,4 +21,5 @@ images.
 By applying these patches on top of a clean v2021.10 build tree for
 U-Boot, you should be able to create a bootable SPL and U-Boot stage
 for flashing on your CHIP. Please note the mainline SPL stage has
-not yet been extensively tested.
+not yet been extensively tested, but at present time it does not
+appear to work properly for the Hynix version of the CHIP.
