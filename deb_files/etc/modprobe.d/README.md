@@ -1,3 +1,3 @@
-Add your modprobe parameters here. By default I blacklist the w1_gpio module
-because it causes issues with kernels >= 5.14 (possibly earlier, I didn't
-test earlier revisions than 5.10 which worked).
+Add your modprobe parameters here. By default I disable powersaving on
+the wifi interface because it causes stability issues (at least I'm
+mostly sure that is the root cause and this is the fix...).
