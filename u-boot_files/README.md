@@ -9,7 +9,11 @@ Additionally, I have included patches that fix the upstream SPL not
 being able to read from the NAND controller. If you wish to use a
 mainline SPL you must apply the patch; if you use Allwinner's BOOT0
 (not tested) or an older binary SPL from NTC's original images, it
-is not necessary.
+is not necessary. Note that this current configuration makes an SPL
+that is compatible only with the Toshiba model. If you wish to make an
+SPL image compatible with the Hynix model, please change the config
+option of CONFIG_SYS_NAND_OOBSIZE from 0x500 (for the Toshiba model)
+to 0x680 (for the Hynix model).
 
 I have also included a patch for the w1-gpio driver that increases
 the time it takes to perform a reset of the w1 bus. This fixes issues
@@ -21,5 +25,4 @@ images.
 By applying these patches on top of a clean v2021.10 build tree for
 U-Boot, you should be able to create a bootable SPL and U-Boot stage
 for flashing on your CHIP. Please note the mainline SPL stage has
-not yet been extensively tested, but at present time it does not
-appear to work properly for the Hynix version of the CHIP.
+not yet been extensively tested.
