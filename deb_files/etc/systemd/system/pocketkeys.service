@@ -1,9 +1,10 @@
 [Unit]
 Description=Set the keyboard layout for PocketCHIP
 DefaultDependencies=no
-Before=local-fs-pre.target
-Wants=local-fs-pre.target
-ConditionPathExists=/bin/setupcon
+#load after systemd-logind.service so the keymap doesn't get clobbered.
+After=systemd-logind.service
+#only load keymap for pocketchip if the i2c keyboard is present
+ConditionPathExists=/sys/class/i2c-adapter/i2c-1/1-0034/input
 
 [Service]
 Type=oneshot
@@ -11,4 +12,4 @@ ExecStart=/usr/bin/loadkeys /usr/local/share/keymaps/pocketchip.kmap
 RemainAfterExit=yes
 
 [Install]
-WantedBy=sysinit.target
+WantedBy=multi-user.target
