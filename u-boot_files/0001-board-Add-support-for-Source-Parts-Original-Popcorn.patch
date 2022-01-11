@@ -1,0 +1,407 @@
+From def653aabad45010e9e1d2fccad649b6ac3538b1 Mon Sep 17 00:00:00 2001
+From: Chris Morgan <macromorgan@hotmail.com>
+Date: Wed, 10 Nov 2021 10:09:15 -0600
+Subject: [PATCH] board: Add support for Source Parts Original Popcorn
+
+Add support for the Source Parts Original Popcorn. Board is
+essentially an NTC CHIP but with USB-C and eMMC instead of NAND.
+
+Signed-off-by: Chris Morgan <macromorgan@hotmail.com>
+---
+ arch/arm/dts/Makefile              |   3 +-
+ arch/arm/dts/sun5i-r8-popcorn.dts  | 338 +++++++++++++++++++++++++++++
+ configs/original_popcorn_defconfig |  23 ++
+ 3 files changed, 363 insertions(+), 1 deletion(-)
+ create mode 100644 arch/arm/dts/sun5i-r8-popcorn.dts
+ create mode 100644 configs/original_popcorn_defconfig
+
+diff --git a/arch/arm/dts/Makefile b/arch/arm/dts/Makefile
+index cc34da7bd8..500e5f4725 100644
+--- a/arch/arm/dts/Makefile
++++ b/arch/arm/dts/Makefile
+@@ -538,7 +538,8 @@ dtb-$(CONFIG_MACH_SUN5I) += \
+ 	sun5i-a13-q8-tablet.dtb \
+ 	sun5i-a13-utoo-p66.dtb \
+ 	sun5i-gr8-chip-pro.dtb \
+-	sun5i-r8-chip.dtb
++	sun5i-r8-chip.dtb \
++	sun5i-r8-popcorn.dtb
+ dtb-$(CONFIG_MACH_SUN6I) += \
+ 	sun6i-a31-app4-evb1.dtb \
+ 	sun6i-a31-colombus.dtb \
+diff --git a/arch/arm/dts/sun5i-r8-popcorn.dts b/arch/arm/dts/sun5i-r8-popcorn.dts
+new file mode 100644
+index 0000000000..6b23d952e8
+--- /dev/null
++++ b/arch/arm/dts/sun5i-r8-popcorn.dts
+@@ -0,0 +1,338 @@
++/*
++ * Copyright 2015 Free Electrons
++ * Copyright 2015 NextThing Co
++ *
++ * Maxime Ripard <maxime.ripard@free-electrons.com>
++ *
++ * This file is dual-licensed: you can use it either under the terms
++ * of the GPL or the X11 license, at your option. Note that this dual
++ * licensing only applies to this file, and not this project as a
++ * whole.
++ *
++ *  a) This file is free software; you can redistribute it and/or
++ *     modify it under the terms of the GNU General Public License as
++ *     published by the Free Software Foundation; either version 2 of the
++ *     License, or (at your option) any later version.
++ *
++ *     This file is distributed in the hope that it will be useful,
++ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
++ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ *     GNU General Public License for more details.
++ *
++ * Or, alternatively,
++ *
++ *  b) Permission is hereby granted, free of charge, to any person
++ *     obtaining a copy of this software and associated documentation
++ *     files (the "Software"), to deal in the Software without
++ *     restriction, including without limitation the rights to use,
++ *     copy, modify, merge, publish, distribute, sublicense, and/or
++ *     sell copies of the Software, and to permit persons to whom the
++ *     Software is furnished to do so, subject to the following
++ *     conditions:
++ *
++ *     The above copyright notice and this permission notice shall be
++ *     included in all copies or substantial portions of the Software.
++ *
++ *     THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
++ *     EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
++ *     OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
++ *     NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
++ *     HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
++ *     WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ *     FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
++ *     OTHER DEALINGS IN THE SOFTWARE.
++ */
++
++/dts-v1/;
++#include "sun5i-r8.dtsi"
++#include "sunxi-common-regulators.dtsi"
++
++#include <dt-bindings/gpio/gpio.h>
++#include <dt-bindings/interrupt-controller/irq.h>
++
++/ {
++	model = "Source Parts Popcorn";
++	compatible = "sourceparts,popcorn","nextthing,chip",
++		     "allwinner,sun5i-r8", "allwinner,sun5i-a13";
++
++	aliases {
++		i2c0 = &i2c0;
++		i2c1 = &i2c1;
++		i2c2 = &i2c2;
++		serial0 = &uart1;
++		serial1 = &uart3;
++		spi0 = &spi2;
++		mmc0 = &mmc2;
++	};
++
++	chosen {
++		stdout-path = "serial0:115200n8";
++	};
++
++	leds {
++		compatible = "gpio-leds";
++
++		status {
++			label = "chip:white:status";
++			gpios = <&axp_gpio 2 GPIO_ACTIVE_HIGH>;
++			default-state = "on";
++		};
++	};
++
++	mmc0_pwrseq: mmc0_pwrseq {
++		compatible = "mmc-pwrseq-simple";
++		pinctrl-names = "default";
++		pinctrl-0 = <&chip_wifi_reg_on_pin>;
++		reset-gpios = <&pio 2 19 GPIO_ACTIVE_LOW>; /* PC19 */
++	};
++
++	onewire {
++		compatible = "w1-gpio";
++		gpios = <&pio 3 2 GPIO_ACTIVE_HIGH>; /* PD2 */
++		pinctrl-names = "default";
++		pinctrl-0 = <&chip_w1_pin>;
++	};
++};
++
++&be0 {
++	status = "okay";
++};
++
++&codec {
++	status = "okay";
++};
++
++&cpu0 {
++	cpu-supply = <&reg_dcdc2>;
++};
++
++&ehci0 {
++	status = "okay";
++};
++
++&i2c0 {
++	pinctrl-names = "default";
++	pinctrl-0 = <&i2c0_pins_a>;
++	status = "okay";
++
++	axp209: pmic@34 {
++		reg = <0x34>;
++
++		/*
++		 * The interrupt is routed through the "External Fast
++		 * Interrupt Request" pin (ball G13 of the module)
++		 * directly to the main interrupt controller, without
++		 * any other controller interfering.
++		 */
++		interrupts = <0>;
++	};
++};
++
++#include "axp209.dtsi"
++
++&ac_power_supply {
++	status = "okay";
++};
++
++&battery_power_supply {
++	status = "okay";
++};
++
++&i2c1 {
++	pinctrl-names = "default";
++	pinctrl-0 = <&i2c1_pins_a>;
++	status = "disabled";
++};
++
++&i2c2 {
++	pinctrl-names = "default";
++	pinctrl-0 = <&i2c2_pins_a>;
++	status = "okay";
++
++	xio: gpio@38 {
++		compatible = "nxp,pcf8574a";
++		reg = <0x38>;
++
++		gpio-controller;
++		#gpio-cells = <2>;
++
++		interrupt-parent = <&pio>;
++		interrupts = <6 0 IRQ_TYPE_EDGE_FALLING>;
++		interrupt-controller;
++		#interrupt-cells = <2>;
++	};
++
++	typec_pd: usb-pd@3f {
++		compatible = "ti,tps6598x";
++		reg = <0x3f>;
++
++		interrupts = <&pio 6 0 IRQ_TYPE_LEVEL_LOW>;
++		interrupt-names = "irq";
++	};
++};
++
++&mmc0_pins_a {
++	bias-pull-up;
++};
++
++&mmc0 {
++	pinctrl-names = "default";
++	pinctrl-0 = <&mmc0_pins_a>;
++	vmmc-supply = <&reg_vcc3v3>;
++	mmc-pwrseq = <&mmc0_pwrseq>;
++	bus-width = <4>;
++	non-removable;
++	status = "okay";
++};
++
++&mmc2 {
++	pinctrl-names = "default";
++	pinctrl-0 = <&mmc2_pins_a>;
++	vmmc-supply = <&reg_vcc3v3>;
++	bus-width = <8>;
++	non-removable;
++	status = "okay";
++
++	mmccard: mmccard@0 {
++		reg = <0>;
++		compatible = "mmc-card";
++	};
++};
++
++&ohci0 {
++	status = "okay";
++};
++
++&otg_sram {
++	status = "okay";
++};
++
++&pio {
++	chip_vbus_pin: chip_vbus_pin@0 {
++		pins = "PB10";
++		function = "gpio_out";
++	};
++
++	chip_wifi_reg_on_pin: chip_wifi_reg_on_pin@0 {
++	        pins = "PC19";
++	        function = "gpio_out";
++	};
++
++	chip_id_det_pin: chip_id_det_pin@0 {
++		pins = "PG2";
++		function = "gpio_in";
++	};
++
++	chip_w1_pin: chip_w1_pin@0 {
++		pins = "PD2";
++		function = "gpio_in";
++	        bias-pull-up;
++	};
++};
++
++&reg_dcdc2 {
++	regulator-min-microvolt = <1000000>;
++	regulator-max-microvolt = <1400000>;
++	regulator-name = "cpuvdd";
++	regulator-always-on;
++};
++
++&reg_dcdc3 {
++	regulator-min-microvolt = <1000000>;
++	regulator-max-microvolt = <1300000>;
++	regulator-name = "corevdd";
++	regulator-always-on;
++};
++
++&reg_ldo1 {
++	regulator-name = "rtcvdd";
++};
++
++&reg_ldo2 {
++	regulator-min-microvolt = <2700000>;
++	regulator-max-microvolt = <3300000>;
++	regulator-name = "avcc";
++	regulator-always-on;
++};
++
++/*
++ * Both LDO3 and LDO4 are used in parallel to power up the WiFi/BT
++ * Chip.
++ *
++ * If those are not enabled, the SDIO part will not enumerate, and
++ * since there's no way currently to pass DT infos to an SDIO device,
++ * we cannot really do better than this ugly hack for now.
++ */
++&reg_ldo3 {
++	regulator-min-microvolt = <3300000>;
++	regulator-max-microvolt = <3300000>;
++	regulator-name = "vcc-wifi-1";
++	regulator-always-on;
++};
++
++&reg_ldo4 {
++	regulator-min-microvolt = <3300000>;
++	regulator-max-microvolt = <3300000>;
++	regulator-name = "vcc-wifi-2";
++	regulator-always-on;
++};
++
++&reg_ldo5 {
++	regulator-min-microvolt = <1800000>;
++	regulator-max-microvolt = <1800000>;
++	regulator-name = "vcc-1v8";
++};
++
++&reg_usb0_vbus {
++	pinctrl-0 = <&chip_vbus_pin>;
++	vin-supply = <&reg_vcc5v0>;
++	gpio = <&pio 1 10 GPIO_ACTIVE_HIGH>; /* PB10 */
++	status = "okay";
++};
++
++&spi2 {
++	pinctrl-names = "default";
++	pinctrl-0 = <&spi2_pins_a>;
++	status = "disabled";
++};
++
++&tcon0 {
++	status = "okay";
++};
++
++&tve0 {
++	status = "okay";
++};
++
++&uart1 {
++	pinctrl-names = "default";
++	pinctrl-0 = <&uart1_pins_b>;
++	status = "okay";
++};
++
++&uart3 {
++	pinctrl-names = "default";
++	pinctrl-0 = <&uart3_pins_a>,
++		    <&uart3_cts_rts_pins_a>;
++	status = "okay";
++};
++
++&usb_otg {
++	dr_mode = "otg";
++	status = "okay";
++};
++
++&usb_power_supply {
++	status = "okay";
++};
++
++&usbphy {
++	pinctrl-names = "default";
++	pinctrl-0 = <&chip_id_det_pin>;
++	status = "okay";
++
++	usb0_id_det-gpio = <&pio 6 2 GPIO_ACTIVE_HIGH>; /* PG2 */
++	usb0_vbus_power-supply = <&usb_power_supply>;
++	usb0_vbus-supply = <&reg_usb0_vbus>;
++	usb1_vbus-supply = <&reg_vcc5v0>;
++};
+diff --git a/configs/original_popcorn_defconfig b/configs/original_popcorn_defconfig
+new file mode 100644
+index 0000000000..b91c8f396e
+--- /dev/null
++++ b/configs/original_popcorn_defconfig
+@@ -0,0 +1,23 @@
++CONFIG_ARM=y
++CONFIG_ARCH_SUNXI=y
++CONFIG_DEFAULT_DEVICE_TREE="sun5i-r8-popcorn"
++CONFIG_SPL=y
++CONFIG_MACH_SUN5I=y
++CONFIG_DRAM_TIMINGS_DDR3_800E_1066G_1333J=y
++CONFIG_USB0_VBUS_PIN="PB10"
++CONFIG_VIDEO_COMPOSITE=y
++CONFIG_CHIP_DIP_SCAN=y
++CONFIG_SPL_I2C=y
++CONFIG_CMD_DFU=y
++CONFIG_DFU_RAM=y
++CONFIG_SYS_I2C_MVTWSI=y
++CONFIG_SYS_I2C_SLAVE=0x7f
++CONFIG_SYS_I2C_SPEED=400000
++CONFIG_MMC=y
++CONFIG_MMC_SUNXI_SLOT_EXTRA=2
++CONFIG_AXP_ALDO3_VOLT=3300
++CONFIG_AXP_ALDO4_VOLT=3300
++CONFIG_CONS_INDEX=2
++CONFIG_USB_EHCI_HCD=y
++CONFIG_USB_OHCI_HCD=y
++CONFIG_USB_MUSB_GADGET=y
+-- 
+2.30.2
+

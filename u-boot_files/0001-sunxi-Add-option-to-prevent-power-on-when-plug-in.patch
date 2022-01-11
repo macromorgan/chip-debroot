@@ -1,0 +1,89 @@
+From e0c30e9bda0af1b462010efcd430cbb7a2625711 Mon Sep 17 00:00:00 2001
+From: Chris Morgan <macromorgan@hotmail.com>
+Date: Tue, 11 Jan 2022 12:03:38 -0600
+Subject: [PATCH] sunxi: Add option to prevent power-on when plug in
+
+For sunxi boards with the AXP209, AXP221, AXP809, and AXP818 PMICs
+(plus possibly others, I only confirmed the datasheets for these),
+it is sometimes desirable to not power up whenever the device is
+plugged in. An example would be when using the NTC CHIP inside a
+PocketCHIP. This provides a configurable option to check if bit 0 of
+register 0 of the PMIC says it was powered because of a power button
+press (0) or a plug-in event (1). If the value is 1 and this option
+is selected, the device shuts down shortly after printing a message
+to console stating the reason why it's shutting down. Powering up the
+board with the power button is not affected.
+
+Signed-off-by: Chris Morgan <macromorgan@hotmail.com>
+---
+ arch/arm/mach-sunxi/Kconfig | 10 ++++++++++
+ board/sunxi/board.c         | 18 ++++++++++++++++++
+ 2 files changed, 28 insertions(+)
+
+diff --git a/arch/arm/mach-sunxi/Kconfig b/arch/arm/mach-sunxi/Kconfig
+index 2c18cf02d1..edadf9cc57 100644
+--- a/arch/arm/mach-sunxi/Kconfig
++++ b/arch/arm/mach-sunxi/Kconfig
+@@ -785,6 +785,16 @@ config AXP_GPIO
+ 	---help---
+ 	Say Y here to enable support for the gpio pins of the axp PMIC ICs.
+ 
++config AXP_DISABLE_POWERON_VIN
++	bool "Disable device power-on when plugged in"
++	depends on AXP209_POWER || AXP221_POWER || AXP809_POWER || AXP818_POWER
++	default n
++	---help---
++	  Say Y here to prevent the device from powering up because of a
++	  plug-in event. When set, the device will power on briefly to
++	  determine why it was powered on, and if it was determined because of
++	  a plug-in event instead of a button press event it will shut off.
++
+ config VIDEO_SUNXI
+ 	bool "Enable graphical uboot console on HDMI, LCD or VGA"
+ 	depends on !MACH_SUN8I_A83T
+diff --git a/board/sunxi/board.c b/board/sunxi/board.c
+index fdbcd40269..22f1193201 100644
+--- a/board/sunxi/board.c
++++ b/board/sunxi/board.c
+@@ -26,6 +26,7 @@
+ #include <asm/arch/display.h>
+ #include <asm/arch/dram.h>
+ #include <asm/arch/mmc.h>
++#include <asm/arch/pmic_bus.h>
+ #include <asm/arch/prcm.h>
+ #include <asm/arch/spl.h>
+ #include <asm/global_data.h>
+@@ -586,6 +587,7 @@ static void sunxi_spl_store_dram_size(phys_addr_t dram_size)
+ void sunxi_board_init(void)
+ {
+ 	int power_failed = 0;
++	__maybe_unused u8 boot_reason;
+ 
+ #ifdef CONFIG_LED_STATUS
+ 	if (IS_ENABLED(CONFIG_SPL_DRIVERS_MISC))
+@@ -601,6 +603,22 @@ void sunxi_board_init(void)
+ 	defined CONFIG_AXP809_POWER || defined CONFIG_AXP818_POWER
+ 	power_failed = axp_init();
+ 
++#if IS_ENABLED(CONFIG_AXP_DISABLE_POWERON_VIN)
++/* This behavior (bit(0) of register 0x00 and shutdown by setting bit(7) of
++ * register 0x32 appears to be common to many AXP chips, at least according to
++ * the datasheets of the AXP209, the AXP221, the AXP803, the AXP809, and the
++ * AXP818. Hardcoding certain registers to prevent pulling in unnecessary
++ * includes.
++ */
++	if (!power_failed) {
++		pmic_bus_read(AXP_POWER_STATUS, &boot_reason);
++		if (boot_reason & BIT(0)) {
++			printf("Power on by charger, shutting down.\n");
++			pmic_bus_write(0x32, BIT(7));
++		}
++	}
++#endif
++
+ #if defined CONFIG_AXP221_POWER || defined CONFIG_AXP809_POWER || \
+ 	defined CONFIG_AXP818_POWER
+ 	power_failed |= axp_set_dcdc1(CONFIG_AXP_DCDC1_VOLT);
+-- 
+2.30.2
+
