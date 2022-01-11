@@ -1,8 +1,8 @@
-From a1f1206581d58c6ca61ffd07fa65b5719eeff5f0 Mon Sep 17 00:00:00 2001
+From 59cf5ba1604468e32586c0393a13c44378f80206 Mon Sep 17 00:00:00 2001
 From: Chris Morgan <macromorgan@hotmail.com>
-Date: Thu, 16 Dec 2021 12:55:38 -0600
-Subject: [PATCH] sunxi-nand: Undo removal of DMA specific code that breaks A13
- SPL
+Date: Tue, 11 Jan 2022 10:37:50 -0600
+Subject: [PATCH] sunxi-nand: Undo removal of DMA specific code that breaks
+ NAND SPL
 
 These patches revert the changes made here, specifically patches 13/20
 and 14/20:
@@ -10,41 +10,37 @@ https://lore.kernel.org/u-boot/20210624120540.7oyhdmerjndsylbq@gilmour/
 
 Signed-off-By: Chris Morgan <macromorgan@hotmail.com>
 ---
- board/sunxi/board.c                   |   5 +
- drivers/mtd/nand/raw/sunxi_nand_spl.c | 133 ++++++++++++++++----------
- 2 files changed, 86 insertions(+), 52 deletions(-)
+ board/sunxi/board.c                   |   3 +
+ drivers/mtd/nand/raw/sunxi_nand_spl.c | 105 ++++++++++++++++++++++++++
+ 2 files changed, 108 insertions(+)
 
 diff --git a/board/sunxi/board.c b/board/sunxi/board.c
-index 1a46100e40..4fd3f1aa64 100644
+index fdbcd40269..bfb56c8602 100644
 --- a/board/sunxi/board.c
 +++ b/board/sunxi/board.c
-@@ -396,6 +396,11 @@ static void nand_clock_setup(void)
+@@ -353,6 +353,9 @@ static void nand_clock_setup(void)
+ #if defined CONFIG_MACH_SUN6I || defined CONFIG_MACH_SUN8I || \
      defined CONFIG_MACH_SUN9I || defined CONFIG_MACH_SUN50I
  	setbits_le32(&ccm->ahb_reset0_cfg, (1 << AHB_GATE_OFFSET_NAND0));
- #endif
-+#ifdef CONFIG_MACH_SUN9I
-+	setbits_le32(&ccm->ahb_gate1, (1 << AHB_GATE_OFFSET_DMA));
-+#else
++#endif
++#if defined(CONFIG_MACH_SUN5I) && defined(CONFIG_NAND_SUNXI)
 +	setbits_le32(&ccm->ahb_gate0, (1 << AHB_GATE_OFFSET_DMA));
-+ #endif
+ #endif
  	setbits_le32(&ccm->nand0_clk_cfg, CCM_NAND_CTRL_ENABLE | AHB_DIV_1);
  }
- 
 diff --git a/drivers/mtd/nand/raw/sunxi_nand_spl.c b/drivers/mtd/nand/raw/sunxi_nand_spl.c
-index 85d8013b1a..95991c60eb 100644
+index a29a76c58d..1b2c995803 100644
 --- a/drivers/mtd/nand/raw/sunxi_nand_spl.c
 +++ b/drivers/mtd/nand/raw/sunxi_nand_spl.c
-@@ -10,8 +10,8 @@
- #include <config.h>
- #include <nand.h>
+@@ -12,6 +12,7 @@
  #include <linux/bitops.h>
--#include <linux/ctype.h>
+ #include <linux/ctype.h>
  #include <linux/delay.h>
 +#include <cpu_func.h>
+ #include <linux/mtd/rawnand.h>
  
  /* registers */
- #define NFC_CTL                    0x00000000
-@@ -84,6 +84,22 @@
+@@ -85,6 +86,22 @@
  #define NFC_CMD_RNDOUT             0x05
  #define NFC_CMD_READSTART          0x30
  
@@ -67,61 +63,33 @@ index 85d8013b1a..95991c60eb 100644
  struct nfc_config {
  	int page_size;
  	int ecc_strength;
-@@ -256,74 +272,87 @@ static const int ecc_bytes[] = {32, 46, 54, 60, 74, 88, 102, 110, 116};
- static int nand_read_page(const struct nfc_config *conf, u32 offs,
- 			  void *dest, int len)
- {
+@@ -254,6 +271,93 @@ static int nand_change_column(u16 column)
+ 
+ static const int ecc_bytes[] = {32, 46, 54, 60, 74, 88, 102, 110, 116};
+ 
++#if defined(CONFIG_MACH_SUN5I)
++static int nand_read_page(const struct nfc_config *conf, u32 offs,
++			  void *dest, int len)
++{
 +	dma_addr_t dst = (dma_addr_t)dest;
- 	int nsectors = len / conf->ecc_size;
- 	u16 rand_seed = 0;
--	int oob_chunk_sz = ecc_bytes[conf->ecc_strength];
--	int page = offs / conf->page_size;
--	u32 ecc_st;
--	int i;
++	int nsectors = len / conf->ecc_size;
++	u16 rand_seed = 0;
 +	u32 val;
 +	int page;
 +
 +	page = offs / conf->page_size;
- 
- 	if (offs % conf->page_size || len % conf->ecc_size ||
- 	    len > conf->page_size || len < 0)
- 		return -EINVAL;
- 
++
++	if (offs % conf->page_size || len % conf->ecc_size ||
++	    len > conf->page_size || len < 0)
++		return -EINVAL;
++
 +	/* clear ecc status */
 +	writel(0, SUNXI_NFC_BASE + NFC_ECC_ST);
 +
- 	/* Choose correct seed if randomized */
- 	if (conf->randomize)
- 		rand_seed = random_seed[page % conf->nseeds];
- 
--	/* Retrieve data from SRAM (PIO) */
--	for (i = 0; i < nsectors; i++) {
--		int data_off = i * conf->ecc_size;
--		int oob_off = conf->page_size + (i * oob_chunk_sz);
--		u8 *data = dest + data_off;
--
--		/* Clear ECC status and restart ECC engine */
--		writel(0, SUNXI_NFC_BASE + NFC_ECC_ST);
--		writel((rand_seed << 16) | (conf->ecc_strength << 12) |
--		       (conf->randomize ? NFC_ECC_RANDOM_EN : 0) |
--		       (conf->ecc_size == 512 ? NFC_ECC_BLOCK_SIZE : 0) |
--		       NFC_ECC_EN | NFC_ECC_EXCEPTION,
--		       SUNXI_NFC_BASE + NFC_ECC_CTL);
--
--		/* Move the data in SRAM */
--		nand_change_column(data_off);
--		writel(conf->ecc_size, SUNXI_NFC_BASE + NFC_CNT);
--		nand_exec_cmd(NFC_DATA_TRANS);
--
--		/*
--		 * Let the ECC engine consume the ECC bytes and possibly correct
--		 * the data.
--		 */
--		nand_change_column(oob_off);
--		nand_exec_cmd(NFC_DATA_TRANS | NFC_ECC_CMD);
--
--		/* Get the ECC status */
--		ecc_st = readl(SUNXI_NFC_BASE + NFC_ECC_ST);
++	/* Choose correct seed if randomized */
++	if (conf->randomize)
++		rand_seed = random_seed[page % conf->nseeds];
++
 +	writel((rand_seed << 16) | (conf->ecc_strength << 12) |
 +		(conf->randomize ? NFC_ECC_RANDOM_EN : 0) |
 +		(conf->ecc_size == 512 ? NFC_ECC_BLOCK_SIZE : 0) |
@@ -159,53 +127,44 @@ index 85d8013b1a..95991c60eb 100644
 +		printf("Error while initializing dma interrupt\n");
 +		return -EIO;
 +	}
- 
--		/* ECC error detected. */
--		if (ecc_st & 0xffff)
--			return -EIO;
++
 +	writel(NFC_ST_DMA_INT_FLAG, SUNXI_NFC_BASE + NFC_ST);
- 
--		/*
--		 * Return 1 if the first chunk is empty (needed for
--		 * configuration detection).
--		 */
--		if (!i && (ecc_st & 0x10000))
--			return 1;
++
 +	if (!check_value_negated(SUNXI_DMA_BASE + SUNXI_DMA_CFG_REG0,
 +				 SUNXI_DMA_DDMA_CFG_REG_LOADING,
 +				 DEFAULT_TIMEOUT_US)) {
 +		printf("Error while waiting for dma transfer to finish\n");
 +		return -EIO;
 +	}
- 
--		/* Retrieve the data from SRAM */
--		memcpy_fromio(data, SUNXI_NFC_BASE + NFC_RAM0_BASE,
--			      conf->ecc_size);
++
 +	invalidate_dcache_range(dst,
 +				ALIGN(dst + conf->ecc_size, ARCH_DMA_MINALIGN));
- 
--		/* Stop the ECC engine */
--		writel(readl(SUNXI_NFC_BASE + NFC_ECC_CTL) & ~NFC_ECC_EN,
--		       SUNXI_NFC_BASE + NFC_ECC_CTL);
++
 +	val = readl(SUNXI_NFC_BASE + NFC_ECC_ST);
- 
--		if (data_off + conf->ecc_size >= len)
--			break;
--	}
++
 +	/* ECC error detected. */
 +	if (val & 0xffff)
 +		return -EIO;
- 
--	return 0;
++
 +	/*
 +	 * Return 1 if the page is empty.
 +	 * We consider the page as empty if the first ECC block is marked
 +	 * empty.
 +	 */
 +	return (val & 0x10000) ? 1 : 0;
++}
++#else
+ static int nand_read_page(const struct nfc_config *conf, u32 offs,
+ 			  void *dest, int len)
+ {
+@@ -326,6 +430,7 @@ static int nand_read_page(const struct nfc_config *conf, u32 offs,
+ 
+ 	return 0;
  }
++#endif
  
  static int nand_max_ecc_strength(struct nfc_config *conf)
+ {
 -- 
 2.30.2
 

@@ -1,16 +1,17 @@
-From 0b1b1070d9c844215eef0bc5bdf644fb8e99e040 Mon Sep 17 00:00:00 2001
+From f5cddf064a99370061cecb75f2566c702cb81418 Mon Sep 17 00:00:00 2001
 From: Chris Morgan <macromorgan@hotmail.com>
-Date: Thu, 16 Dec 2021 12:50:38 -0600
+Date: Tue, 11 Jan 2022 10:24:27 -0600
 Subject: [PATCH] sunxi: Add support for slc emulation on mlc NAND
 
 This patch series adds support for slc emulation on MLC NAND, and
-enables support for the NAND controller in the devicetree.
+enables support for the NAND controller in the devicetree and for
+UBIFS booting in the configuration file header.
 
 Signed-off-By: Chris Morgan <macromorgan@hotmail.com>
 ---
  arch/arm/dts/sun5i-r8-chip.dts   |  16 +
  cmd/mtdparts.c                   |  20 ++
- drivers/mtd/mtdcore.c            | 564 ++++++++++++++++++++++++-------
+ drivers/mtd/mtdcore.c            | 563 +++++++++++++++++++++++++------
  drivers/mtd/mtdcore.h            |   1 -
  drivers/mtd/mtdpart.c            |   7 +
  drivers/mtd/nand/raw/nand_base.c |  67 ++++
@@ -18,7 +19,7 @@ Signed-off-By: Chris Morgan <macromorgan@hotmail.com>
  include/linux/mtd/mtd.h          | 190 ++++++++++-
  include/linux/mtd/partitions.h   |  24 +-
  include/mtd/mtd-abi.h            |   1 +
- 10 files changed, 767 insertions(+), 125 deletions(-)
+ 10 files changed, 769 insertions(+), 124 deletions(-)
 
 diff --git a/arch/arm/dts/sun5i-r8-chip.dts b/arch/arm/dts/sun5i-r8-chip.dts
 index 879a4b0f3b..80dc037986 100644
@@ -48,7 +49,7 @@ index 879a4b0f3b..80dc037986 100644
  	status = "okay";
  };
 diff --git a/cmd/mtdparts.c b/cmd/mtdparts.c
-index 3048700778..5c1ad09bf5 100644
+index 3048700778..8e10997021 100644
 --- a/cmd/mtdparts.c
 +++ b/cmd/mtdparts.c
 @@ -110,6 +110,10 @@ DECLARE_GLOBAL_DATA_PTR;
@@ -66,10 +67,10 @@ index 3048700778..5c1ad09bf5 100644
  		p += 2;
  	}
  
-+        if (strncmp(p, "slc", 3) == 0) {
-+                mask_flags |= MTD_SLC_ON_MLC_EMULATION_CMD;
-+                p += 3;
-+        }
++	if (strncmp(p, "slc", 3) == 0) {
++		mask_flags |= MTD_SLC_ON_MLC_EMULATION_CMD;
++		p += 3;
++	}
 +
  	/* check for next partition definition */
  	if (*p == ',') {
@@ -78,22 +79,22 @@ index 3048700778..5c1ad09bf5 100644
  				maxlen -= 2;
  			}
  
-+                        /* slc mask flag */
-+                        if (part->mask_flags && MTD_SLC_ON_MLC_EMULATION_CMD) {
-+                                len = 3;
-+                                if (len > maxlen)
-+                                        goto cleanup;
-+                                *(p++) = 's';
-+                                *(p++) = 'l';
++			/* slc mask flag */
++			if (part->mask_flags && MTD_SLC_ON_MLC_EMULATION_CMD) {
++				len = 3;
++				if (len > maxlen)
++					goto cleanup;
++				*(p++) = 's';
++				*(p++) = 'l';
 +				*(p++) = 'c';
-+                                maxlen -= 3;
-+                        }
++				maxlen -= 3;
++			}
 +
  			/* print ',' separator if there are other partitions
  			 * following */
  			if (dev->num_parts > part_cnt) {
 diff --git a/drivers/mtd/mtdcore.c b/drivers/mtd/mtdcore.c
-index 582129d0df..efb749cdf2 100644
+index 1d45fb55c7..e45a306a42 100644
 --- a/drivers/mtd/mtdcore.c
 +++ b/drivers/mtd/mtdcore.c
 @@ -397,6 +397,114 @@ static struct device_type mtd_devtype = {
@@ -289,7 +290,7 @@ index 582129d0df..efb749cdf2 100644
  	return 0;
  }
  EXPORT_SYMBOL_GPL(__get_mtd_device);
-@@ -896,13 +1035,20 @@ EXPORT_SYMBOL_GPL(put_mtd_device);
+@@ -896,28 +1035,66 @@ EXPORT_SYMBOL_GPL(put_mtd_device);
  
  void __put_mtd_device(struct mtd_info *mtd)
  {
@@ -315,8 +316,6 @@ index 582129d0df..efb749cdf2 100644
  }
  EXPORT_SYMBOL_GPL(__put_mtd_device);
  
-@@ -915,17 +1061,47 @@ EXPORT_SYMBOL_GPL(__put_mtd_device);
-  */
  int mtd_erase(struct mtd_info *mtd, struct erase_info *instr)
  {
 +	struct mtd_info *master = mtd_get_master(mtd);
@@ -337,7 +336,6 @@ index 582129d0df..efb749cdf2 100644
 -	instr->fail_addr = MTD_FAIL_ADDR_UNKNOWN;
 -	if (!instr->len) {
 -		instr->state = MTD_ERASE_DONE;
--		mtd_erase_callback(instr);
 +
 +	if (!instr->len)
  		return 0;
@@ -368,7 +366,7 @@ index 582129d0df..efb749cdf2 100644
  }
  EXPORT_SYMBOL_GPL(mtd_erase);
  
-@@ -936,30 +1112,36 @@ EXPORT_SYMBOL_GPL(mtd_erase);
+@@ -928,30 +1105,36 @@ EXPORT_SYMBOL_GPL(mtd_erase);
  int mtd_point(struct mtd_info *mtd, loff_t from, size_t len, size_t *retlen,
  	      void **virt, resource_size_t *phys)
  {
@@ -409,7 +407,7 @@ index 582129d0df..efb749cdf2 100644
  }
  EXPORT_SYMBOL_GPL(mtd_unpoint);
  #endif
-@@ -980,68 +1162,54 @@ unsigned long mtd_get_unmapped_area(struct mtd_info *mtd, unsigned long len,
+@@ -972,68 +1155,54 @@ unsigned long mtd_get_unmapped_area(struct mtd_info *mtd, unsigned long len,
  }
  EXPORT_SYMBOL_GPL(mtd_get_unmapped_area);
  
@@ -513,7 +511,7 @@ index 582129d0df..efb749cdf2 100644
  }
  EXPORT_SYMBOL_GPL(mtd_write);
  
-@@ -1055,8 +1223,10 @@ EXPORT_SYMBOL_GPL(mtd_write);
+@@ -1047,8 +1216,10 @@ EXPORT_SYMBOL_GPL(mtd_write);
  int mtd_panic_write(struct mtd_info *mtd, loff_t to, size_t len, size_t *retlen,
  		    const u_char *buf)
  {
@@ -525,7 +523,7 @@ index 582129d0df..efb749cdf2 100644
  		return -EOPNOTSUPP;
  	if (to < 0 || to > mtd->size || len > mtd->size - to)
  		return -EINVAL;
-@@ -1064,7 +1234,8 @@ int mtd_panic_write(struct mtd_info *mtd, loff_t to, size_t len, size_t *retlen,
+@@ -1056,7 +1227,8 @@ int mtd_panic_write(struct mtd_info *mtd, loff_t to, size_t len, size_t *retlen,
  		return -EROFS;
  	if (!len)
  		return 0;
@@ -535,7 +533,7 @@ index 582129d0df..efb749cdf2 100644
  }
  EXPORT_SYMBOL_GPL(mtd_panic_write);
  
-@@ -1101,9 +1272,107 @@ static int mtd_check_oob_ops(struct mtd_info *mtd, loff_t offs,
+@@ -1093,9 +1265,107 @@ static int mtd_check_oob_ops(struct mtd_info *mtd, loff_t offs,
  	return 0;
  }
  
@@ -643,7 +641,7 @@ index 582129d0df..efb749cdf2 100644
  	ops->retlen = ops->oobretlen = 0;
  
  	ret_code = mtd_check_oob_ops(mtd, from, ops);
-@@ -1111,14 +1380,15 @@ int mtd_read_oob(struct mtd_info *mtd, loff_t from, struct mtd_oob_ops *ops)
+@@ -1103,14 +1373,15 @@ int mtd_read_oob(struct mtd_info *mtd, loff_t from, struct mtd_oob_ops *ops)
  		return ret_code;
  
  	/* Check the validity of a potential fallback on mtd->_read */
@@ -664,7 +662,7 @@ index 582129d0df..efb749cdf2 100644
  
  	/*
  	 * In cases where ops->datbuf != NULL, mtd->_read_oob() has semantics
-@@ -1137,6 +1407,7 @@ EXPORT_SYMBOL_GPL(mtd_read_oob);
+@@ -1129,6 +1400,7 @@ EXPORT_SYMBOL_GPL(mtd_read_oob);
  int mtd_write_oob(struct mtd_info *mtd, loff_t to,
  				struct mtd_oob_ops *ops)
  {
@@ -672,7 +670,7 @@ index 582129d0df..efb749cdf2 100644
  	int ret;
  
  	ops->retlen = ops->oobretlen = 0;
-@@ -1149,14 +1420,14 @@ int mtd_write_oob(struct mtd_info *mtd, loff_t to,
+@@ -1141,14 +1413,14 @@ int mtd_write_oob(struct mtd_info *mtd, loff_t to,
  		return ret;
  
  	/* Check the validity of a potential fallback on mtd->_write */
@@ -693,7 +691,7 @@ index 582129d0df..efb749cdf2 100644
  }
  EXPORT_SYMBOL_GPL(mtd_write_oob);
  
-@@ -1179,15 +1450,17 @@ EXPORT_SYMBOL_GPL(mtd_write_oob);
+@@ -1171,15 +1443,17 @@ EXPORT_SYMBOL_GPL(mtd_write_oob);
  int mtd_ooblayout_ecc(struct mtd_info *mtd, int section,
  		      struct mtd_oob_region *oobecc)
  {
@@ -714,7 +712,7 @@ index 582129d0df..efb749cdf2 100644
  }
  EXPORT_SYMBOL_GPL(mtd_ooblayout_ecc);
  
-@@ -1211,15 +1484,17 @@ EXPORT_SYMBOL_GPL(mtd_ooblayout_ecc);
+@@ -1203,15 +1477,17 @@ EXPORT_SYMBOL_GPL(mtd_ooblayout_ecc);
  int mtd_ooblayout_free(struct mtd_info *mtd, int section,
  		       struct mtd_oob_region *oobfree)
  {
@@ -735,7 +733,7 @@ index 582129d0df..efb749cdf2 100644
  }
  EXPORT_SYMBOL_GPL(mtd_ooblayout_free);
  
-@@ -1528,60 +1803,69 @@ EXPORT_SYMBOL_GPL(mtd_ooblayout_count_eccbytes);
+@@ -1520,60 +1796,69 @@ EXPORT_SYMBOL_GPL(mtd_ooblayout_count_eccbytes);
  int mtd_get_fact_prot_info(struct mtd_info *mtd, size_t len, size_t *retlen,
  			   struct otp_info *buf)
  {
@@ -815,7 +813,7 @@ index 582129d0df..efb749cdf2 100644
  	if (ret)
  		return ret;
  
-@@ -1595,80 +1879,129 @@ EXPORT_SYMBOL_GPL(mtd_write_user_prot_reg);
+@@ -1587,80 +1872,129 @@ EXPORT_SYMBOL_GPL(mtd_write_user_prot_reg);
  
  int mtd_lock_user_prot_reg(struct mtd_info *mtd, loff_t from, size_t len)
  {
@@ -959,7 +957,7 @@ index 582129d0df..efb749cdf2 100644
  }
  EXPORT_SYMBOL_GPL(mtd_block_markbad);
  
-@@ -1719,12 +2052,17 @@ static int default_mtd_writev(struct mtd_info *mtd, const struct kvec *vecs,
+@@ -1711,12 +2045,17 @@ static int default_mtd_writev(struct mtd_info *mtd, const struct kvec *vecs,
  int mtd_writev(struct mtd_info *mtd, const struct kvec *vecs,
  	       unsigned long count, loff_t to, size_t *retlen)
  {
@@ -992,7 +990,7 @@ index 1d181a1045..73f8f21271 100644
  
  int __init init_mtdchar(void);
 diff --git a/drivers/mtd/mtdpart.c b/drivers/mtd/mtdpart.c
-index aa58f722da..a686271839 100644
+index a435ce6d07..092853e872 100644
 --- a/drivers/mtd/mtdpart.c
 +++ b/drivers/mtd/mtdpart.c
 @@ -148,6 +148,12 @@ static int mtd_parse_partition(const char **_mtdparts,
@@ -1008,7 +1006,7 @@ index aa58f722da..a686271839 100644
  	/* Check for a potential next partition definition */
  	if (*mtdparts == ',') {
  		if (partition->size == MTD_SIZE_REMAINING) {
-@@ -591,6 +597,7 @@ static struct mtd_info *allocate_partition(struct mtd_info *master,
+@@ -580,6 +586,7 @@ static struct mtd_info *allocate_partition(struct mtd_info *master,
  	/* set up the MTD object for this partition */
  	slave->type = master->type;
  	slave->flags = master->flags & ~part->mask_flags;
@@ -1017,7 +1015,7 @@ index aa58f722da..a686271839 100644
  	slave->writesize = master->writesize;
  	slave->writebufsize = master->writebufsize;
 diff --git a/drivers/mtd/nand/raw/nand_base.c b/drivers/mtd/nand/raw/nand_base.c
-index b1fd779884..097b82c808 100644
+index f7616985d9..20f54444ef 100644
 --- a/drivers/mtd/nand/raw/nand_base.c
 +++ b/drivers/mtd/nand/raw/nand_base.c
 @@ -105,6 +105,56 @@ static int nand_do_write_oob(struct mtd_info *mtd, loff_t to,
@@ -1077,7 +1075,7 @@ index b1fd779884..097b82c808 100644
  static int check_offs_len(struct mtd_info *mtd,
  					loff_t ofs, uint64_t len)
  {
-@@ -4496,6 +4546,23 @@ ident_done:
+@@ -4492,6 +4542,23 @@ ident_done:
  			break;
  	}
  
@@ -1102,10 +1100,10 @@ index b1fd779884..097b82c808 100644
  		WARN_ON(chip->options & NAND_BUSWIDTH_16);
  		chip->options |= busw;
 diff --git a/include/configs/sunxi-common.h b/include/configs/sunxi-common.h
-index 958b850da4..2ee241fe9b 100644
+index 7260eb72a4..c783e7e919 100644
 --- a/include/configs/sunxi-common.h
 +++ b/include/configs/sunxi-common.h
-@@ -462,6 +462,8 @@ extern int soft_i2c_gpio_scl;
+@@ -397,6 +397,8 @@
  	"uuid_gpt_system=" UUID_GPT_SYSTEM "\0" \
  	"partitions=" PARTS_DEFAULT "\0" \
  	BOOTCMD_SUNXI_COMPAT \
@@ -1115,10 +1113,10 @@ index 958b850da4..2ee241fe9b 100644
  
  #else /* ifndef CONFIG_SPL_BUILD */
 diff --git a/include/linux/mtd/mtd.h b/include/linux/mtd/mtd.h
-index 3b302fb8c3..f55e469f75 100644
+index 7455400981..d8f65c49fb 100644
 --- a/include/linux/mtd/mtd.h
 +++ b/include/linux/mtd/mtd.h
-@@ -133,6 +133,82 @@ struct mtd_ooblayout_ops {
+@@ -132,6 +132,82 @@ struct mtd_ooblayout_ops {
  		     struct mtd_oob_region *oobfree);
  };
  
@@ -1201,7 +1199,7 @@ index 3b302fb8c3..f55e469f75 100644
  /*
   * Internal ECC layout control structure. For historical reasons, there is a
   * similar, smaller struct nand_ecclayout_user (in mtd-abi.h) that is retained
-@@ -148,6 +224,43 @@ struct nand_ecclayout {
+@@ -147,6 +223,43 @@ struct nand_ecclayout {
  
  struct module;	/* only needed for owner field in mtd_info */
  
@@ -1245,7 +1243,7 @@ index 3b302fb8c3..f55e469f75 100644
  struct mtd_info {
  	u_char type;
  	uint32_t flags;
-@@ -211,6 +324,9 @@ struct mtd_info {
+@@ -210,6 +323,9 @@ struct mtd_info {
  	/* OOB layout description */
  	const struct mtd_ooblayout_ops *ooblayout;
  
@@ -1255,7 +1253,7 @@ index 3b302fb8c3..f55e469f75 100644
  	/* ECC layout structure pointer - read only! */
  	struct nand_ecclayout *ecclayout;
  
-@@ -329,8 +445,31 @@ struct mtd_info {
+@@ -328,8 +444,31 @@ struct mtd_info {
  	 * MTD device can itself be a partition).
  	 */
  	struct list_head partitions;
@@ -1287,7 +1285,7 @@ index 3b302fb8c3..f55e469f75 100644
  #if IS_ENABLED(CONFIG_DM)
  static inline void mtd_set_ofnode(struct mtd_info *mtd, ofnode node)
  {
-@@ -391,11 +530,22 @@ static inline void mtd_set_ooblayout(struct mtd_info *mtd,
+@@ -390,11 +529,22 @@ static inline void mtd_set_ooblayout(struct mtd_info *mtd,
  	mtd->ooblayout = ooblayout;
  }
  
@@ -1310,7 +1308,7 @@ index 3b302fb8c3..f55e469f75 100644
  int mtd_erase(struct mtd_info *mtd, struct erase_info *instr);
  #ifndef __UBOOT__
  int mtd_point(struct mtd_info *mtd, loff_t from, size_t len, size_t *retlen,
-@@ -433,8 +583,10 @@ int mtd_writev(struct mtd_info *mtd, const struct kvec *vecs,
+@@ -432,8 +582,10 @@ int mtd_writev(struct mtd_info *mtd, const struct kvec *vecs,
  
  static inline void mtd_sync(struct mtd_info *mtd)
  {
@@ -1323,7 +1321,7 @@ index 3b302fb8c3..f55e469f75 100644
  }
  
  int mtd_lock(struct mtd_info *mtd, loff_t ofs, uint64_t len);
-@@ -447,13 +599,15 @@ int mtd_block_markbad(struct mtd_info *mtd, loff_t ofs);
+@@ -446,13 +598,15 @@ int mtd_block_markbad(struct mtd_info *mtd, loff_t ofs);
  #ifndef __UBOOT__
  static inline int mtd_suspend(struct mtd_info *mtd)
  {
@@ -1342,7 +1340,7 @@ index 3b302fb8c3..f55e469f75 100644
  }
  #endif
  
-@@ -487,9 +641,29 @@ static inline uint32_t mtd_mod_by_ws(uint64_t sz, struct mtd_info *mtd)
+@@ -486,9 +640,29 @@ static inline uint32_t mtd_mod_by_ws(uint64_t sz, struct mtd_info *mtd)
  	return do_div(sz, mtd->writesize);
  }
  
@@ -1373,7 +1371,7 @@ index 3b302fb8c3..f55e469f75 100644
  }
  
  static inline int mtd_type_is_nand(const struct mtd_info *mtd)
-@@ -499,7 +673,9 @@ static inline int mtd_type_is_nand(const struct mtd_info *mtd)
+@@ -498,7 +672,9 @@ static inline int mtd_type_is_nand(const struct mtd_info *mtd)
  
  static inline int mtd_can_have_bb(const struct mtd_info *mtd)
  {
@@ -1385,7 +1383,7 @@ index 3b302fb8c3..f55e469f75 100644
  
  	/* Kernel-side ioctl definitions */
 diff --git a/include/linux/mtd/partitions.h b/include/linux/mtd/partitions.h
-index 3822237f2a..34eec5f67a 100644
+index 0f5a233266..06b36c6881 100644
 --- a/include/linux/mtd/partitions.h
 +++ b/include/linux/mtd/partitions.h
 @@ -20,6 +20,12 @@
@@ -1399,12 +1397,12 @@ index 3822237f2a..34eec5f67a 100644
 + *	report them to the MTD subsystem. If set this property stores an array
 + *	of parser names to use when looking for subpartitions.
   * size: the partition size; if defined as MTDPART_SIZ_FULL, the partition
-  * 	will extend to the end of the master MTD device.
+  *	will extend to the end of the master MTD device.
   * offset: absolute starting position within the master MTD device; if
 @@ -31,6 +37,7 @@
-  * 	master MTD flag set for the corresponding MTD partition.
-  * 	For example, to force a read-only partition, simply adding
-  * 	MTD_WRITEABLE to the mask_flags will do the trick.
+  *	master MTD flag set for the corresponding MTD partition.
+  *	For example, to force a read-only partition, simply adding
+  *	MTD_WRITEABLE to the mask_flags will do the trick.
 + * add_flags: contains flags to add to the parent flags
   *
   * Note: writeable partitions require their size and offset be
@@ -1463,7 +1461,7 @@ index 3822237f2a..34eec5f67a 100644
  int mtd_add_partition(struct mtd_info *master, const char *name,
  		      long long offset, long long length);
 diff --git a/include/mtd/mtd-abi.h b/include/mtd/mtd-abi.h
-index 8d9761050f..2f6ce18795 100644
+index ea244fbaeb..96850aff93 100644
 --- a/include/mtd/mtd-abi.h
 +++ b/include/mtd/mtd-abi.h
 @@ -94,6 +94,7 @@ struct mtd_write_req {
