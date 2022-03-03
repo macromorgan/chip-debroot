@@ -1,0 +1,26 @@
+software =
+{
+	version = "2022.02.28";
+	description = "Debian Bullseye for NTC CHIP";
+
+	partitions: (
+		{
+			name = "rootfs";
+			device = "mtd5";
+			size = 1610612736;
+		}
+	);
+	images: (
+		{
+			filename = "rootfs.ubifs";
+			volume = "rootfs";
+			installed-directly = true;
+		}
+	);
+	scripts: (
+		{
+			filename = "installscript.sh";
+			type = "shellscript";
+		}
+	);
+}
